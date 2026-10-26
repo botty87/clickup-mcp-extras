@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
-
 const BASE_URL = "https://api.clickup.com/api/v2";
 
 export class ClickUpError extends Error {
@@ -74,11 +71,12 @@ export type UploadedAttachment = {
 
 export async function uploadTaskAttachment(
   taskId: string,
-  filePath: string,
+  data: Buffer,
+  fileName: string,
+  mimeType: string,
 ): Promise<UploadedAttachment> {
-  const data = await readFile(filePath);
   const form = new FormData();
-  form.append("attachment", new Blob([data]), basename(filePath));
+  form.append("attachment", new Blob([new Uint8Array(data)], { type: mimeType }), fileName);
 
   const path = `/task/${encodeURIComponent(taskId)}/attachment`;
   const res = await fetch(`${BASE_URL}${path}`, {

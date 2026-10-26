@@ -110,7 +110,7 @@ Accettano `blocks: Block[]` dove `Block` è:
 - `reply_to_comment_with_mentions(comment_id, blocks, task_id?, notify_all?, assignee?)` — `task_id` serve solo se ci sono immagini
 - `update_comment_with_mentions(comment_id, blocks, resolved?, assignee?)` — solo testo e mention
 
-Le immagini (png, jpg, gif, webp) vengono caricate come allegato del task e poi mostrate nel commento: compaiono quindi anche nel pannello Allegati del task. ClickUp non permette di aggiungere un'immagine modificando un commento esistente, quindi l'update accetta solo testo e mention e toglie le immagini che il commento aveva: per aggiungere uno screenshot, rispondi al commento.
+Le immagini (png, jpg, gif, webp, riconosciute dal contenuto e non dall'estensione; percorso assoluto) vengono caricate come allegato del task e poi mostrate nel commento: compaiono quindi anche nel pannello Allegati del task. ClickUp non permette di aggiungere un'immagine modificando un commento esistente, quindi l'update accetta solo testo e mention e toglie le immagini che il commento aveva: per aggiungere uno screenshot, rispondi al commento.
 
 ### Gestione parent / subtask
 

@@ -13,7 +13,7 @@ The official MCP's `clickup_create_comment` takes Markdown and now real mentions
 - `reply_to_comment_with_mentions` — reply in a comment thread (pass `task_id` when the reply has images)
 - `update_comment_with_mentions` — replace an existing comment's body with text and mention blocks
 
-Image blocks (`{ "type": "image", "file_path": "/abs/path.png", "width": 300 }`) take a local png, jpg, gif or webp. The file is uploaded to the task as an attachment and then referenced from the comment, so it also shows up in the task's Attachments panel (the public API cannot attach a file to a comment, as the app does). `width` is the display width in px, default 300.
+Image blocks (`{ "type": "image", "file_path": "/abs/path.png", "width": 300 }`) take an absolute path to a local png, jpg, gif or webp, recognised by its content, not its extension. The file is uploaded to the task as an attachment and then referenced from the comment, so it also shows up in the task's Attachments panel (the public API cannot attach a file to a comment, as the app does). `width` is the display width in px: default 300, or the image's own width if smaller. Images are read and checked before any upload, so a bad path leaves nothing on the task.
 
 > ClickUp rejects an edit that adds an image to a comment (`ACCESS_610`, `can_use_public_api_dev_key`), so `update_comment_with_mentions` accepts text and mentions only and drops any image the comment had. To add a picture to an existing comment, reply to it.
 

@@ -1,5 +1,5 @@
-import { access } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, isAbsolute } from "node:path";
 import { z } from "zod";
 import { uploadTaskAttachment, type UploadedAttachment } from "./clickup-client.js";
 
@@ -18,13 +18,13 @@ const ImageBlock = z.object({
   file_path: z
     .string()
     .min(1)
-    .describe("Absolute path of a local image (png, jpg, gif, webp)."),
+    .describe("Absolute path of a local image (png, jpg, gif, webp); the content is checked, not the extension."),
   width: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe("Display width in px. Default 300, like the ClickUp app."),
+    .describe("Display width in px. Default 300 like the ClickUp app, or the image's own width if smaller."),
 });
 
 export const BlockSchema = z.discriminatedUnion("type", [TextBlock, MentionBlock, ImageBlock]);
@@ -40,29 +40,35 @@ type ClickUpBlock =
   | { type: "tag"; user: { id: number } }
   | { type: "image"; text: string; image: Record<string, unknown>; attributes: Record<string, unknown> };
 
-const IMAGE_MIME: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-};
-
 const DEFAULT_IMAGE_WIDTH = 300;
 
-function imageExtension(filePath: string): string {
-  const ext = extname(filePath).slice(1).toLowerCase();
-  if (!IMAGE_MIME[ext]) {
-    throw new Error(
-      `Unsupported image type for ${basename(filePath)}: use one of ${Object.keys(IMAGE_MIME).join(", ")}.`,
-    );
+// Recognised by content, so a secret renamed to *.png is never published.
+function detectImageMime(data: Buffer): string | undefined {
+  const ascii = (start: number, end: number) => data.subarray(start, end).toString("latin1");
+  if (data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return "image/jpeg";
+  if (ascii(0, 6) === "GIF87a" || ascii(0, 6) === "GIF89a") return "image/gif";
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp";
+  return undefined;
+}
+
+type PreparedImage = { data: Buffer; fileName: string; mime: string };
+
+async function readImage(filePath: string): Promise<PreparedImage> {
+  if (!isAbsolute(filePath)) {
+    throw new Error(`Image path must be absolute (no ~ or relative paths): ${filePath}`);
   }
-  return ext;
+  const info = await stat(filePath).catch(() => undefined);
+  if (!info?.isFile()) throw new Error(`Image not found: ${filePath}`);
+  const data = await readFile(filePath);
+  const mime = detectImageMime(data);
+  if (!mime) throw new Error(`Not a png, jpg, gif or webp image: ${basename(filePath)}`);
+  return { data, fileName: basename(filePath), mime };
 }
 
 // Same shape the ClickUp app writes when an image is pasted into a comment.
-function toImageBlock(att: UploadedAttachment, width: number | undefined): ClickUpBlock {
-  const ext = att.extension.toLowerCase();
+function toImageBlock(att: UploadedAttachment, mime: string, width: number | undefined): ClickUpBlock {
+  const displayWidth = width ?? Math.min(DEFAULT_IMAGE_WIDTH, att.width ?? DEFAULT_IMAGE_WIDTH);
   return {
     type: "image",
     text: att.title,
@@ -70,8 +76,8 @@ function toImageBlock(att: UploadedAttachment, width: number | undefined): Click
       id: att.id,
       name: att.title,
       title: att.title,
-      type: ext,
-      extension: IMAGE_MIME[ext] ?? `image/${ext}`,
+      type: mime.slice("image/".length),
+      extension: mime,
       thumbnail_large: att.thumbnail_large,
       thumbnail_medium: att.thumbnail_medium,
       thumbnail_small: att.thumbnail_small,
@@ -81,7 +87,7 @@ function toImageBlock(att: UploadedAttachment, width: number | undefined): Click
       height: att.height,
     },
     attributes: {
-      width: String(width ?? DEFAULT_IMAGE_WIDTH),
+      width: String(displayWidth),
       "data-id": att.id,
       "data-attachment": null,
       "data-natural-width": String(att.width ?? ""),
@@ -112,18 +118,14 @@ export async function toClickUpBlocks(
   blocks: Block[],
   taskId?: string,
 ): Promise<ConvertedBlocks> {
-  const images = blocks.filter((b) => b.type === "image");
-  if (images.length > 0) {
+  // Read and check every image before uploading any, so a bad one leaves no orphan.
+  const images = new Map<Block, PreparedImage>();
+  for (const b of blocks) {
+    if (b.type !== "image") continue;
     if (!taskId) {
       throw new Error("Image blocks need task_id: images are uploaded to that task as attachments.");
     }
-    // Fail before uploading anything, so a bad path leaves no orphan attachment.
-    for (const b of images) {
-      imageExtension(b.file_path);
-      await access(b.file_path).catch(() => {
-        throw new Error(`Image not found: ${b.file_path}`);
-      });
-    }
+    images.set(b, await readImage(b.file_path));
   }
 
   const comment: ClickUpBlock[] = [];
@@ -133,24 +135,24 @@ export async function toClickUpBlocks(
     return !last || ("text" in last && !("type" in last) && last.text.endsWith("\n"));
   };
 
-  for (const b of blocks) {
-    if (b.type === "text") {
-      comment.push({ text: b.value });
-    } else if (b.type === "mention") {
-      comment.push({ type: "tag", user: { id: b.user_id } });
-    } else {
-      let att: UploadedAttachment;
-      try {
-        att = await uploadTaskAttachment(taskId!, b.file_path);
-      } catch (err) {
-        throw withUploadedAttachments(err, attachments);
+  try {
+    for (const b of blocks) {
+      if (b.type === "text") {
+        comment.push({ text: b.value });
+      } else if (b.type === "mention") {
+        comment.push({ type: "tag", user: { id: b.user_id } });
+      } else {
+        const image = images.get(b)!;
+        const att = await uploadTaskAttachment(taskId!, image.data, image.fileName, image.mime);
+        attachments.push({ id: att.id, url: att.url });
+        // An image is a line of its own: start it on a new line and close it.
+        if (!endsWithNewline()) comment.push({ text: "\n" });
+        comment.push(toImageBlock(att, image.mime, b.width));
+        comment.push({ text: "\n" });
       }
-      attachments.push({ id: att.id, url: att.url });
-      // An image is a line of its own: start it on a new line and close it.
-      if (!endsWithNewline()) comment.push({ text: "\n" });
-      comment.push(toImageBlock(att, b.width));
-      comment.push({ text: "\n" });
     }
+  } catch (err) {
+    throw withUploadedAttachments(err, attachments);
   }
 
   return { comment, attachments };

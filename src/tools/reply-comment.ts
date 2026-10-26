@@ -8,7 +8,9 @@ export const replyCommentInputShape = {
     .string()
     .min(1)
     .optional()
-    .describe("Task the comment belongs to. Required only when blocks contain image blocks: images are uploaded there."),
+    .describe(
+      "Task the parent comment belongs to. Required only when blocks contain image blocks: images are uploaded there. ClickUp cannot check it, so pass the task the comment is on, or the images land on another task.",
+    ),
   blocks: z
     .array(BlockSchema)
     .min(1)
