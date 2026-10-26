@@ -11,15 +11,19 @@ MCP server locale che aggiunge a Claude Code i tool ClickUp con **@-mention real
 
 > Se manca Node: `brew install node` (macOS) o nvm/fnm.
 
-## 1. Estrai lo zip
+## 1. Scarica ed estrai lo zip
+
+Scarica `clickup-mcp-extras-vX.Y.Z.zip` dall'ultima release: https://github.com/botty87/clickup-mcp-extras/releases/latest
 
 Estrai in una cartella stabile a livello utente (non cestinabile). Convenzione: `~/.local/share/clickup-mcp-extras/`.
 
 ```sh
 mkdir -p ~/.local/share
-unzip clickup-mcp-extras.zip -d ~/.local/share/
+unzip ~/Downloads/clickup-mcp-extras-vX.Y.Z.zip -d ~/.local/share/   # metti la versione scaricata
 cd ~/.local/share/clickup-mcp-extras
 ```
+
+> Se Safari ha già estratto lo zip da solo, in `~/Downloads` trovi la cartella `clickup-mcp-extras` invece dello zip: spostala con `mv ~/Downloads/clickup-mcp-extras ~/.local/share/`.
 
 Se preferisci altro path va bene: ricorda solo di usarlo coerentemente al passo 4.
 
@@ -63,7 +67,7 @@ npm run build
 Lo script di setup ti stampa la riga giusta. Sarà tipo:
 
 ```sh
-claude mcp add clickup-extras --scope user -- node /Users/TUO-USERNAME/.local/share/clickup-mcp-extras/dist/index.js
+claude mcp add clickup-extras --scope user -- node "$HOME/.local/share/clickup-mcp-extras/dist/index.js"
 ```
 
 > `--scope user` rende il server disponibile in **tutte** le sessioni Claude Code, non solo nella cartella corrente.
@@ -78,7 +82,7 @@ Deve apparire `clickup-extras: ✓ Connected`. Se vedi `✗ Failed to connect`: 
 
 ## 6. Riavvia Claude Code
 
-Se Claude Code è già aperto, esci con `/exit` e riapri. Necessario per registrare i tool MCP della sessione.
+Se Claude Code è già aperto, esci con `/exit` e riapri, oppure usa `/mcp` → riconnetti `clickup-extras`. Ogni sessione aperta carica il server all'avvio, quindi va fatto in ognuna.
 
 ## 7. Test rapido
 
@@ -127,7 +131,7 @@ L'MCP ClickUp ufficiale non espone il campo `parent` nello schema di `update_tas
 - Controlla `.env` esiste e contiene `CLICKUP_API_TOKEN=pk_...`
 - Token deve iniziare con `pk_`
 - Riprova: `node ~/.local/share/clickup-mcp-extras/dist/index.js < /dev/null` → se stampa `CLICKUP_API_TOKEN missing` → manca `.env`
-- Se cambi `.env` riavvia Claude Code
+- Se cambi `.env` riavvia Claude Code (o `/mcp` → riconnetti)
 
 ### Mention appare come `@user_12345` invece del nome
 - Il `user_id` è errato o l'utente non fa parte del workspace del task
@@ -137,16 +141,22 @@ L'MCP ClickUp ufficiale non espone il campo `parent` nello schema di `update_tas
 - Token revocato o errato → rigenera al passo 2
 
 ### Modifiche al codice non hanno effetto
-- Dopo modifica src: `npm run build` poi riavvia Claude Code
+- Dopo modifica src: `npm run build` poi riavvia Claude Code (o `/mcp` → riconnetti)
 
 ## Aggiornamenti futuri
 
-Se Marco rilascia una nuova versione:
+Le nuove versioni escono nella pagina Releases: https://github.com/botty87/clickup-mcp-extras/releases
+
+Si sostituisce la cartella intera, così non restano file tolti dalla nuova versione; solo il tuo `.env` (che non è nello zip) va salvato e rimesso:
 
 ```sh
-cd ~/.local/share/clickup-mcp-extras
-# scarica nuovo zip, sovrascrivi sorgente (NON .env)
+cd ~/.local/share
+cp clickup-mcp-extras/.env /tmp/clickup-extras.env
+rm -rf clickup-mcp-extras
+unzip ~/Downloads/clickup-mcp-extras-vX.Y.Z.zip -d ~/.local/share/   # metti la versione scaricata
+mv /tmp/clickup-extras.env clickup-mcp-extras/.env
+cd clickup-mcp-extras
 npm install
 npm run build
-# riavvia Claude Code
+# poi riavvia Claude Code, o /mcp → riconnetti clickup-extras in ogni sessione aperta
 ```
