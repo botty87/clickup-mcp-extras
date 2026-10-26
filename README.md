@@ -35,7 +35,7 @@ Image blocks (`{ "type": "image", "file_path": "/abs/path.png", "width": 300 }`)
    ```
 4. Register with Claude Code:
    ```sh
-   claude mcp add clickup-extras -- node /Users/marco.bottichio/.local/share/clickup-mcp-extras/dist/index.js
+   claude mcp add clickup-extras --scope user -- node "$HOME/.local/share/clickup-mcp-extras/dist/index.js"
    ```
 5. Verify: `claude mcp list` should show `clickup-extras: ✓ Connected`.
 
@@ -50,9 +50,9 @@ post_comment_with_mentions(
   task_id: "abc123",
   blocks: [
     { "type": "text", "value": "Ciao " },
-    { "type": "mention", "user_id": 18324758 },
+    { "type": "mention", "user_id": 12345678 },
     { "type": "text", "value": ", controlla qui grazie!" },
-    { "type": "image", "file_path": "/Users/me/Desktop/screenshot.png" }
+    { "type": "image", "file_path": "/Users/you/Desktop/screenshot.png" }
   ],
   notify_all: true
 )

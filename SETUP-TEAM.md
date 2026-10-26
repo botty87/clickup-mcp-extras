@@ -11,13 +11,15 @@ MCP server locale che aggiunge a Claude Code i tool ClickUp con **@-mention real
 
 > Se manca Node: `brew install node` (macOS) o nvm/fnm.
 
-## 1. Estrai lo zip
+## 1. Scarica ed estrai lo zip
+
+Scarica `clickup-mcp-extras-vX.Y.Z.zip` dall'ultima release: https://github.com/botty87/clickup-mcp-extras/releases/latest
 
 Estrai in una cartella stabile a livello utente (non cestinabile). Convenzione: `~/.local/share/clickup-mcp-extras/`.
 
 ```sh
 mkdir -p ~/.local/share
-unzip clickup-mcp-extras.zip -d ~/.local/share/
+unzip ~/Downloads/clickup-mcp-extras-v*.zip -d ~/.local/share/
 cd ~/.local/share/clickup-mcp-extras
 ```
 
@@ -141,12 +143,14 @@ L'MCP ClickUp ufficiale non espone il campo `parent` nello schema di `update_tas
 
 ## Aggiornamenti futuri
 
-Se Marco rilascia una nuova versione:
+Le nuove versioni escono nella pagina Releases: https://github.com/botty87/clickup-mcp-extras/releases
 
 ```sh
+# scarica lo zip della nuova versione, poi estrailo sopra la cartella esistente
+# (il tuo .env non è nello zip e resta com'è)
+unzip -o ~/Downloads/clickup-mcp-extras-v*.zip -d ~/.local/share/
 cd ~/.local/share/clickup-mcp-extras
-# scarica nuovo zip, sovrascrivi sorgente (NON .env)
 npm install
 npm run build
-# riavvia Claude Code
+# poi in Claude Code: /mcp → riconnetti clickup-extras (o riavvia)
 ```
