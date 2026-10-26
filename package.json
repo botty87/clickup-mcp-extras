@@ -1,6 +1,6 @@
 {
   "name": "clickup-mcp-extras",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local MCP server exposing ClickUp comment tools with structured @-mentions support.",
   "private": true,
   "type": "module",
