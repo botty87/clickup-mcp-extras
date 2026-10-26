@@ -60,7 +60,7 @@ if claude mcp list 2>/dev/null | grep -q "^clickup-extras:"; then
   echo ""
   echo "==> clickup-extras already registered in Claude Code."
   echo "    Run 'claude mcp list' to verify status."
-  echo "    Restart Claude Code to pick up the new build."
+  echo "    Restart Claude Code (or /mcp -> reconnect clickup-extras) to pick up the new build."
   exit 0
 fi
 
@@ -71,4 +71,4 @@ claude mcp add clickup-extras --scope user -- node "$SCRIPT_DIR/dist/index.js"
 echo ""
 echo "==> Done."
 echo "    Verify: claude mcp list"
-echo "    Then restart Claude Code (/exit + relaunch) to load the tools."
+echo "    Then restart Claude Code (/exit + relaunch, or /mcp -> reconnect) to load the tools."
