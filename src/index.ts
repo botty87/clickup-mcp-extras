@@ -38,7 +38,7 @@ if (!process.env.CLICKUP_API_TOKEN) {
 const server = new McpServer(
   {
     name: "clickup-mcp-extras",
-    version: "0.2.0",
+    version: "0.3.0",
   },
   {
     capabilities: { tools: {} },
@@ -47,21 +47,21 @@ const server = new McpServer(
 
 server.tool(
   "post_comment_with_mentions",
-  "Create a new ClickUp task comment with structured @-mention blocks. Use this instead of the official ClickUp MCP's create_task_comment when you need real mentions (notifications + blue badge) rather than plain '@Name' text.",
+  "Create a new ClickUp task comment from structured blocks: text, real @-mentions and inline images from local files. Use this instead of the official ClickUp MCP's create_comment when the comment needs an image shown inline: the official tool cannot render one.",
   postCommentInputShape,
   handlePostComment,
 );
 
 server.tool(
   "update_comment_with_mentions",
-  "Replace an existing ClickUp comment's body with structured blocks (text + mentions). Use to fix or rewrite a previously posted comment.",
+  "Replace an existing ClickUp comment's body with structured text and mention blocks. Use to fix or rewrite a previously posted comment. Images cannot be added or kept: ClickUp rejects them on edit, so a comment with images is better answered with a reply.",
   updateCommentInputShape,
   handleUpdateComment,
 );
 
 server.tool(
   "reply_to_comment_with_mentions",
-  "Post a threaded reply to an existing ClickUp comment with structured @-mention blocks.",
+  "Post a threaded reply to an existing ClickUp comment with structured blocks (text, mentions, inline images). Pass task_id when adding images.",
   replyCommentInputShape,
   handleReplyComment,
 );

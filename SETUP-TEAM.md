@@ -1,6 +1,6 @@
 # Setup `clickup-mcp-extras` — guida per il team
 
-MCP server locale che aggiunge a Claude Code i tool ClickUp con **@-mention reali** (notifica + box blu cliccabile). Coesiste con l'MCP ClickUp ufficiale, che resta attivo per tutto il resto.
+MCP server locale che aggiunge a Claude Code i tool ClickUp con **@-mention reali** (notifica + box blu cliccabile) e **immagini dentro i commenti**, come quando incolli uno screenshot nell'app. Coesiste con l'MCP ClickUp ufficiale, che resta attivo per tutto il resto.
 
 ## Prerequisiti
 
@@ -96,18 +96,21 @@ Per ottenere il tuo `user_id` (e quello dei colleghi) usa l'MCP ufficiale ClickU
 
 ## Tool esposti
 
-### Commenti con @-mention
+### Commenti con @-mention e immagini
 
 Accettano `blocks: Block[]` dove `Block` è:
 
 ```ts
-{ type: "text", value: "..." }          // testo normale
-{ type: "mention", user_id: 12345 }      // mention reale
+{ type: "text", value: "..." }                         // testo normale
+{ type: "mention", user_id: 12345 }                     // mention reale
+{ type: "image", file_path: "/abs/path.png", width?: 300 } // immagine nel commento
 ```
 
 - `post_comment_with_mentions(task_id, blocks, notify_all?, assignee?)`
-- `update_comment_with_mentions(comment_id, blocks, resolved?, assignee?)`
-- `reply_to_comment_with_mentions(comment_id, blocks, notify_all?, assignee?)`
+- `reply_to_comment_with_mentions(comment_id, blocks, task_id?, notify_all?, assignee?)` — `task_id` serve solo se ci sono immagini
+- `update_comment_with_mentions(comment_id, blocks, resolved?, assignee?)` — solo testo e mention
+
+Le immagini (png, jpg, gif, webp, riconosciute dal contenuto e non dall'estensione; percorso assoluto) vengono caricate come allegato del task e poi mostrate nel commento: compaiono quindi anche nel pannello Allegati del task. ClickUp non permette di aggiungere un'immagine modificando un commento esistente, quindi l'update accetta solo testo e mention e toglie le immagini che il commento aveva: per aggiungere uno screenshot, rispondi al commento.
 
 ### Gestione parent / subtask
 
