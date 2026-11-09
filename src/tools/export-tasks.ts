@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { request } from "../clickup-client.js";
 
 const KEEP_SNAPSHOTS = 5;
@@ -44,11 +44,24 @@ export function snapshotDir(): string {
   return join(stateHome, "clickup-mcp-extras", "snapshots");
 }
 
-/** Write via a temp file in the same directory, then rename: readers never see half a file. */
+/**
+ * Write via a temp file in the same directory, then rename: readers never see
+ * half a file. Owner-only (0600): snapshots hold the whole workspace.
+ */
 async function writeAtomic(path: string, data: string): Promise<void> {
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
+  try {
+    await writeFile(tmp, data, { mode: 0o600 });
+    await rename(tmp, path);
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
+  }
+}
+
+/** Sorted, and empty treated as absent: the same filters always compare equal. */
+function normalizeIds(ids: string[] | undefined): string[] | null {
+  return ids && ids.length > 0 ? [...ids].sort() : null;
 }
 
 async function readPrevious(path: string): Promise<Snapshot | undefined> {
@@ -88,34 +101,37 @@ export async function handleExportTasks(input: ExportTasksInput) {
   }
   const started = Date.now();
 
-  const tasks: Task[] = [];
+  // Keyed by ID: offset paging can return a task twice if the workspace
+  // changes while the export runs.
+  const byId = new Map<string, Task>();
   let pages = 0;
-  for (; pages < MAX_PAGES; pages++) {
+  let done = false;
+  while (!done && pages < MAX_PAGES) {
     const res = await request<{ tasks: Task[]; last_page?: boolean }>(
       "GET",
       `/team/${encodeURIComponent(teamId)}/task?${buildQuery(input, pages)}`,
     );
-    tasks.push(...res.tasks);
-    if (res.last_page || res.tasks.length === 0) {
-      pages++;
-      break;
-    }
+    pages++;
+    for (const t of res.tasks) byId.set(t.id, t);
+    done = Boolean(res.last_page) || res.tasks.length === 0;
   }
-  if (pages >= MAX_PAGES) {
+  if (!done) {
     throw new Error(`Stopped after ${MAX_PAGES} pages without reaching the last one.`);
   }
+  const tasks = [...byId.values()];
 
   const params = {
     include_closed: input.include_closed,
     include_subtasks: input.include_subtasks,
-    space_ids: input.space_ids ?? null,
-    list_ids: input.list_ids ?? null,
+    space_ids: normalizeIds(input.space_ids),
+    list_ids: normalizeIds(input.list_ids),
   };
   const fetchedAt = new Date().toISOString();
   const snapshot: Snapshot = { fetched_at: fetchedAt, team_id: teamId, params, tasks };
 
   const dir = snapshotDir();
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
   const latestPath = join(dir, "latest.json");
   const previous = await readPrevious(latestPath);
 

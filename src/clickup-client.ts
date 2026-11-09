@@ -24,6 +24,9 @@ function getToken(): string {
 const MAX_429_RETRIES = 3;
 const LOW_REMAINING = 10;
 const MAX_WAIT_MS = 70_000;
+// Floor for a 429 wait: if the local clock runs ahead of ClickUp's, the reset
+// can look already past and the retries would otherwise fire back to back.
+const MIN_429_WAIT_MS = 2_000;
 
 // Earliest time the next request may go out. Shared by every call in this
 // process; other processes using the same token see the same server-side
@@ -32,16 +35,29 @@ let pauseUntil = 0;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Numeric header value, or undefined when the header is missing or not a number. */
+function numericHeader(res: Response, name: string): number | undefined {
+  const raw = res.headers.get(name);
+  if (raw === null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /** Epoch ms of X-RateLimit-Reset (documented as a Unix timestamp), if present. */
 function resetAt(res: Response): number | undefined {
-  const raw = Number(res.headers.get("x-ratelimit-reset"));
-  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  const raw = numericHeader(res, "x-ratelimit-reset");
+  if (raw === undefined || raw <= 0) return undefined;
   return raw > 1e12 ? raw : raw * 1000;
 }
 
-function waitUntil(at: number | undefined, fallbackMs: number): number {
+function waitUntil(at: number | undefined, fallbackMs: number, minMs = 0): number {
   const ms = at === undefined ? fallbackMs : at - Date.now() + 1000;
-  return Math.min(Math.max(ms, 0), MAX_WAIT_MS);
+  return Math.min(Math.max(ms, minMs), MAX_WAIT_MS);
+}
+
+/** Never shorten a pause another response already set. */
+function pauseFor(ms: number): void {
+  pauseUntil = Math.max(pauseUntil, Date.now() + ms);
 }
 
 /**
@@ -60,14 +76,14 @@ async function clickupFetch(path: string, init: RequestInit): Promise<Response> 
     });
 
     const reset = resetAt(res);
-    const remaining = Number(res.headers.get("x-ratelimit-remaining"));
-    if (Number.isFinite(remaining) && remaining < LOW_REMAINING) {
-      pauseUntil = Date.now() + waitUntil(reset, 60_000);
+    const remaining = numericHeader(res, "x-ratelimit-remaining");
+    if (remaining !== undefined && remaining < LOW_REMAINING) {
+      pauseFor(waitUntil(reset, 60_000));
     }
 
     if (res.status !== 429 || attempt >= MAX_429_RETRIES) return res;
     await res.body?.cancel();
-    pauseUntil = Date.now() + waitUntil(reset, 60_000);
+    pauseFor(waitUntil(reset, 60_000, MIN_429_WAIT_MS));
   }
 }
 
