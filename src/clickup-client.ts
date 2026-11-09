@@ -28,9 +28,10 @@ const MAX_WAIT_MS = 70_000;
 // can look already past and the retries would otherwise fire back to back.
 const MIN_429_WAIT_MS = 2_000;
 
-// Earliest time the next request may go out. Shared by every call in this
-// process; other processes using the same token see the same server-side
-// counter in the X-RateLimit-* headers, so no cross-process lock is needed.
+// Earliest time the next request may go out, shared by every call in this
+// process. Other processes using the same token are not coordinated: they can
+// read the same X-RateLimit-Remaining and overshoot together, and the 429
+// retry below is what absorbs that.
 let pauseUntil = 0;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -81,9 +82,12 @@ async function clickupFetch(path: string, init: RequestInit): Promise<Response> 
       pauseFor(waitUntil(reset, 60_000));
     }
 
-    if (res.status !== 429 || attempt >= MAX_429_RETRIES) return res;
-    await res.body?.cancel();
+    if (res.status !== 429) return res;
+    // Pause even when giving up, so the next call does not go straight back
+    // into the same exhausted window.
     pauseFor(waitUntil(reset, 60_000, MIN_429_WAIT_MS));
+    if (attempt >= MAX_429_RETRIES) return res;
+    await res.body?.cancel();
   }
 }
 

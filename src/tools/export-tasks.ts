@@ -112,6 +112,11 @@ export async function handleExportTasks(input: ExportTasksInput) {
       `/team/${encodeURIComponent(teamId)}/task?${buildQuery(input, pages)}`,
     );
     pages++;
+    if (!res || !Array.isArray(res.tasks)) {
+      throw new Error(
+        `Unexpected response for page ${pages - 1}: ${JSON.stringify(res).slice(0, 300)}`,
+      );
+    }
     for (const t of res.tasks) byId.set(t.id, t);
     done = Boolean(res.last_page) || res.tasks.length === 0;
   }
@@ -126,6 +131,10 @@ export async function handleExportTasks(input: ExportTasksInput) {
     space_ids: normalizeIds(input.space_ids),
     list_ids: normalizeIds(input.list_ids),
   };
+  // Only a whole-workspace export becomes latest.json, so the baseline (and the
+  // documented `jq ... latest.json`) never turns into a filtered subset.
+  const isFull =
+    input.include_closed && input.include_subtasks && !params.space_ids && !params.list_ids;
   const fetchedAt = new Date().toISOString();
   const snapshot: Snapshot = { fetched_at: fetchedAt, team_id: teamId, params, tasks };
 
@@ -133,12 +142,12 @@ export async function handleExportTasks(input: ExportTasksInput) {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
   const latestPath = join(dir, "latest.json");
-  const previous = await readPrevious(latestPath);
+  const previous = isFull ? await readPrevious(latestPath) : undefined;
 
   const json = JSON.stringify(snapshot);
   const path = join(dir, `tasks-${fetchedAt.replace(/[:.]/g, "-")}.json`);
   await writeAtomic(path, json);
-  await writeAtomic(latestPath, json);
+  if (isFull) await writeAtomic(latestPath, json);
 
   const old = (await readdir(dir))
     .filter((f) => /^tasks-.*\.json$/.test(f))
@@ -148,7 +157,9 @@ export async function handleExportTasks(input: ExportTasksInput) {
 
   // A diff only means something against a snapshot taken with the same filters.
   let removed: { count: number; ids: string[] } | string;
-  if (!previous) {
+  if (!isFull) {
+    removed = "filtered export: not compared, latest.json unchanged";
+  } else if (!previous) {
     removed = "no previous snapshot";
   } else if (
     previous.team_id !== teamId ||

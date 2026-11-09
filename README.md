@@ -24,7 +24,7 @@ Image blocks (`{ "type": "image", "file_path": "/abs/path.png", "width": 300 }`)
 > Clearing the parent (promoting a subtask to standalone) is **not supported** by ClickUp REST API v2 — `parent: null` returns 200 but is silently ignored. Not a wrapper limitation.
 
 ### Bulk export (read-only)
-- `export_tasks` — read every task of a workspace (closed and subtasks included by default, optional `space_ids` / `list_ids` filters) through the REST API and save it as a local JSON snapshot
+- `export_tasks` — read the tasks of a workspace (closed and subtasks included by default, optional `space_ids` / `list_ids` filters; archived tasks are not returned by ClickUp's team endpoint) through the REST API and save it as a local JSON snapshot
 
 The official MCP counts every call, reads included, against a daily cap shared by the workspace (300 per 24 h on the Core plan). This tool uses the REST API with your personal token instead: about one request per 100 tasks, limited only by the per-token rate limit (100 requests/min on most plans). The full tasks never enter the conversation: the tool returns the snapshot path, counts by status, assignee and list, and the IDs missing since the previous snapshot (deleted, archived, moved or no longer visible). Query the file from the shell:
 
@@ -32,7 +32,7 @@ The official MCP counts every call, reads included, against a daily cap shared b
 jq '[.tasks[] | select(.status.status == "in progress") | {id, name}]' ~/.local/state/clickup-mcp-extras/snapshots/latest.json
 ```
 
-Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
+Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. Only a whole-workspace export (no filters) updates `latest.json` and is compared with the previous one; a filtered export just writes its own file. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
 
 ### Rate limiting
 Every request goes through one wrapper that reads `X-RateLimit-Remaining` / `X-RateLimit-Reset`: it pauses when fewer than 10 requests are left and, on a 429, waits for the reset and retries up to 3 times.
