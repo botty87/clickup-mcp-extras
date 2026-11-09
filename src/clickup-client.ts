@@ -21,18 +21,64 @@ function getToken(): string {
   return token;
 }
 
+const MAX_429_RETRIES = 3;
+const LOW_REMAINING = 10;
+const MAX_WAIT_MS = 70_000;
+
+// Earliest time the next request may go out. Shared by every call in this
+// process; other processes using the same token see the same server-side
+// counter in the X-RateLimit-* headers, so no cross-process lock is needed.
+let pauseUntil = 0;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Epoch ms of X-RateLimit-Reset (documented as a Unix timestamp), if present. */
+function resetAt(res: Response): number | undefined {
+  const raw = Number(res.headers.get("x-ratelimit-reset"));
+  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  return raw > 1e12 ? raw : raw * 1000;
+}
+
+function waitUntil(at: number | undefined, fallbackMs: number): number {
+  const ms = at === undefined ? fallbackMs : at - Date.now() + 1000;
+  return Math.min(Math.max(ms, 0), MAX_WAIT_MS);
+}
+
+/**
+ * The single place where this server talks to ClickUp. Keeps under the
+ * per-token rate limit: pauses when X-RateLimit-Remaining runs low and, on a
+ * 429 (request not executed), waits for the reset and retries.
+ */
+async function clickupFetch(path: string, init: RequestInit): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const delay = pauseUntil - Date.now();
+    if (delay > 0) await sleep(delay);
+
+    const res = await fetch(`${BASE_URL}${path}`, {
+      ...init,
+      headers: { Authorization: getToken(), ...init.headers },
+    });
+
+    const reset = resetAt(res);
+    const remaining = Number(res.headers.get("x-ratelimit-remaining"));
+    if (Number.isFinite(remaining) && remaining < LOW_REMAINING) {
+      pauseUntil = Date.now() + waitUntil(reset, 60_000);
+    }
+
+    if (res.status !== 429 || attempt >= MAX_429_RETRIES) return res;
+    await res.body?.cancel();
+    pauseUntil = Date.now() + waitUntil(reset, 60_000);
+  }
+}
+
 export async function request<T = unknown>(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const url = `${BASE_URL}${path}`;
-  const res = await fetch(url, {
+  const res = await clickupFetch(path, {
     method,
-    headers: {
-      Authorization: getToken(),
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
@@ -79,10 +125,6 @@ export async function uploadTaskAttachment(
   form.append("attachment", new Blob([new Uint8Array(data)], { type: mimeType }), fileName);
 
   const path = `/task/${encodeURIComponent(taskId)}/attachment`;
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: "POST",
-    headers: { Authorization: getToken() },
-    body: form,
-  });
+  const res = await clickupFetch(path, { method: "POST", body: form });
   return parseResponse<UploadedAttachment>(res, "POST", path);
 }
