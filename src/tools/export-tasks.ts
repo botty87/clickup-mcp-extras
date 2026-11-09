@@ -64,9 +64,11 @@ function normalizeIds(ids: string[] | undefined): string[] | null {
   return ids && ids.length > 0 ? [...ids].sort() : null;
 }
 
+/** The previous full snapshot, or undefined if missing or not in the expected shape. */
 async function readPrevious(path: string): Promise<Snapshot | undefined> {
   try {
-    return JSON.parse(await readFile(path, "utf8")) as Snapshot;
+    const s = JSON.parse(await readFile(path, "utf8")) as Partial<Snapshot>;
+    return typeof s.team_id === "string" && Array.isArray(s.tasks) ? (s as Snapshot) : undefined;
   } catch {
     return undefined;
   }
@@ -144,28 +146,28 @@ export async function handleExportTasks(input: ExportTasksInput) {
   const latestPath = join(dir, "latest.json");
   const previous = isFull ? await readPrevious(latestPath) : undefined;
 
+  // Full and filtered exports keep separate pools of KEEP_SNAPSHOTS, so filtered
+  // runs never push the full-workspace history out.
+  const prefix = isFull ? "tasks-" : "filtered-";
   const json = JSON.stringify(snapshot);
-  const path = join(dir, `tasks-${fetchedAt.replace(/[:.]/g, "-")}.json`);
+  const path = join(dir, `${prefix}${fetchedAt.replace(/[:.]/g, "-")}.json`);
   await writeAtomic(path, json);
   if (isFull) await writeAtomic(latestPath, json);
 
   const old = (await readdir(dir))
-    .filter((f) => /^tasks-.*\.json$/.test(f))
+    .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
     .sort()
     .slice(0, -KEEP_SNAPSHOTS);
   await Promise.all(old.map((f) => rm(join(dir, f), { force: true })));
 
-  // A diff only means something against a snapshot taken with the same filters.
+  // Only full exports are compared, and only within the same workspace.
   let removed: { count: number; ids: string[] } | string;
   if (!isFull) {
     removed = "filtered export: not compared, latest.json unchanged";
   } else if (!previous) {
     removed = "no previous snapshot";
-  } else if (
-    previous.team_id !== teamId ||
-    JSON.stringify(previous.params) !== JSON.stringify(params)
-  ) {
-    removed = "previous snapshot used different filters";
+  } else if (previous.team_id !== teamId) {
+    removed = "previous snapshot is from another workspace";
   } else {
     const now = new Set(tasks.map((t) => t.id));
     const gone = previous.tasks.map((t) => t.id).filter((id) => !now.has(id));
@@ -174,7 +176,7 @@ export async function handleExportTasks(input: ExportTasksInput) {
 
   const summary = {
     path,
-    latest: latestPath,
+    latest: isFull ? latestPath : null,
     count: tasks.length,
     pages,
     duration_s: Math.round((Date.now() - started) / 100) / 10,

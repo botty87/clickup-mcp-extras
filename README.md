@@ -32,7 +32,7 @@ The official MCP counts every call, reads included, against a daily cap shared b
 jq '[.tasks[] | select(.status.status == "in progress") | {id, name}]' ~/.local/state/clickup-mcp-extras/snapshots/latest.json
 ```
 
-Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. Only a whole-workspace export (no filters) updates `latest.json` and is compared with the previous one; a filtered export just writes its own file. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
+Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. Only a whole-workspace export (no filters) updates `latest.json` and is compared with the previous one; a filtered export writes a `filtered-*.json` file, and each kind keeps its own last 5. ClickUp pages by offset, so a task created, deleted or moved while an export runs can be missed and appear among the missing IDs: rerun the export to confirm. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
 
 ### Rate limiting
 Every request goes through one wrapper that reads `X-RateLimit-Remaining` / `X-RateLimit-Reset`: it pauses when fewer than 10 requests are left and, on a 429, waits for the reset and retries up to 3 times.

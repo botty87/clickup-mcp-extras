@@ -45,8 +45,9 @@
       "mcp__clickup-extras__reparent_subtask",
       "mcp__clickup-extras__set_task_parent",
       "Read(~/.local/share/clickup-mcp-extras/.env)",
-      "Read(**/clickup-mcp-extras/.env)",
-      "Bash(*api.clickup.com*)"
+      "Read(~/**/clickup-mcp-extras/.env)",
+      "Bash(*api.clickup.com*)",
+      "Bash(*clickup-mcp-extras/.env*)"
     ]
   }
 }

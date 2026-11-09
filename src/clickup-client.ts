@@ -24,9 +24,9 @@ function getToken(): string {
 const MAX_429_RETRIES = 3;
 const LOW_REMAINING = 10;
 const MAX_WAIT_MS = 70_000;
-// Floor for a 429 wait: if the local clock runs ahead of ClickUp's, the reset
-// can look already past and the retries would otherwise fire back to back.
-const MIN_429_WAIT_MS = 2_000;
+// ClickUp's rate-limit window is one minute. Used when a 429 carries no usable
+// reset: missing, or already past because the local clock runs ahead.
+const WINDOW_MS = 60_000;
 
 // Earliest time the next request may go out, shared by every call in this
 // process. Other processes using the same token are not coordinated: they can
@@ -51,9 +51,9 @@ function resetAt(res: Response): number | undefined {
   return raw > 1e12 ? raw : raw * 1000;
 }
 
-function waitUntil(at: number | undefined, fallbackMs: number, minMs = 0): number {
+function waitUntil(at: number | undefined, fallbackMs: number): number {
   const ms = at === undefined ? fallbackMs : at - Date.now() + 1000;
-  return Math.min(Math.max(ms, minMs), MAX_WAIT_MS);
+  return Math.min(Math.max(ms, 0), MAX_WAIT_MS);
 }
 
 /** Never shorten a pause another response already set. */
@@ -68,24 +68,25 @@ function pauseFor(ms: number): void {
  */
 async function clickupFetch(path: string, init: RequestInit): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
-    const delay = pauseUntil - Date.now();
-    if (delay > 0) await sleep(delay);
+    // Loop: another response may extend the pause while this one sleeps.
+    for (let d = pauseUntil - Date.now(); d > 0; d = pauseUntil - Date.now()) {
+      await sleep(d);
+    }
 
-    const res = await fetch(`${BASE_URL}${path}`, {
-      ...init,
-      headers: { Authorization: getToken(), ...init.headers },
-    });
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", getToken());
+    const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
 
     const reset = resetAt(res);
     const remaining = numericHeader(res, "x-ratelimit-remaining");
     if (remaining !== undefined && remaining < LOW_REMAINING) {
-      pauseFor(waitUntil(reset, 60_000));
+      pauseFor(waitUntil(reset, WINDOW_MS));
     }
 
     if (res.status !== 429) return res;
     // Pause even when giving up, so the next call does not go straight back
     // into the same exhausted window.
-    pauseFor(waitUntil(reset, 60_000, MIN_429_WAIT_MS));
+    pauseFor(reset !== undefined && reset > Date.now() ? waitUntil(reset, WINDOW_MS) : WINDOW_MS);
     if (attempt >= MAX_429_RETRIES) return res;
     await res.body?.cancel();
   }
