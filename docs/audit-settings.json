@@ -47,7 +47,8 @@
       "Read(~/.local/share/clickup-mcp-extras/.env)",
       "Read(~/**/clickup-mcp-extras/.env)",
       "Bash(*api.clickup.com*)",
-      "Bash(*clickup-mcp-extras/.env*)"
+      "Bash(*clickup-mcp-extras/.env*)",
+      "Bash(*cli.js apply*)"
     ]
   }
 }

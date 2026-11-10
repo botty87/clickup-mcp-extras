@@ -1,7 +1,7 @@
 {
   "name": "clickup-mcp-extras",
-  "version": "0.4.0",
-  "description": "Local MCP server exposing ClickUp tools: comments with structured @-mentions and images, subtask reparenting, bulk task export.",
+  "version": "0.5.0",
+  "description": "Local MCP server exposing ClickUp tools: comments with structured @-mentions and images, subtask reparenting, bulk task export and plan-based bulk changes.",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "node --test test/"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
