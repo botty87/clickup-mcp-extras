@@ -278,12 +278,47 @@ test("rollback.json is written even when a read fails mid-run", async () => {
   assert.deepEqual(rollback.ops, [{ op: "remove_tag", task_id: "a", args: { tag: "first" }, expected_before: { has_tag: true } }]);
 });
 
-test("a status write with an unknown outcome is in the rollback", async () => {
-  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "set_status", task_id: "a", args: { status: "done" } }] });
+test("a status write with an unknown outcome is left to the note, and a rerun makes it a normal undo", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "add_tag", task_id: "b", args: { tag: "first" } },
+      { op: "set_status", task_id: "a", args: { status: "done" }, expected_before: { status: "in review" } },
+    ],
+  });
   const short = planHash(plan).slice(0, 8);
   failNext = { method: "PUT", status: 504 };
   const r = await apply(plan, io(short), { approve: short });
-  assert.match(r.stopped, /outcome is unknown.*rollback\.json includes its undo/);
-  const rollback = parsePlan(JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8")));
-  assert.deepEqual(rollback.ops, [{ op: "set_status", task_id: "a", args: { status: "in review" }, expected_before: { status: "done" } }]);
+  assert.match(r.stopped, /outcome is unknown/);
+  let rollback = parsePlan(JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8")));
+  assert.deepEqual(rollback.ops, [{ op: "remove_tag", task_id: "b", args: { tag: "first" }, expected_before: { has_tag: true } }]);
+  assert.match(rollback.note, /Outcome unknown.*#2 set_status on a/);
+
+  // The write did not land; the rerun applies it, and the rollback has one undo for it, not two.
+  const again = await apply(plan, io(short), { approve: short });
+  assert.equal(again.applied, 1);
+  rollback = parsePlan(JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8")));
+  assert.deepEqual(rollback.ops.map((o) => `${o.op} ${o.task_id}`), ["set_status a", "remove_tag b"]);
+  assert.doesNotMatch(rollback.note, /Outcome unknown/);
+});
+
+test("on resume the preview marks done ops as already applied, not as drift", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "set_status", task_id: "a", args: { status: "done" }, expected_before: { status: "in review" } },
+      { op: "add_tag", task_id: "b", args: { tag: "x" }, expected_before: { has_tag: true } },
+    ],
+  });
+  const short = planHash(plan).slice(0, 8);
+  const first = await apply(plan, io(short), { approve: short });
+  assert.match(first.stopped, /drift at #2/);
+  const o = io(short);
+  tasks.b.tags.push({ name: "x" });
+  await apply(plan, o, { approve: short, skipDrift: true });
+  const text = o.lines.join("\n");
+  assert.match(text, /#1 set_status a "Task A": already applied/);
+  assert.match(text, /drifted: 0/);
 });

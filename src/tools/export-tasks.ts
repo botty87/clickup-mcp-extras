@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { request } from "../clickup-client.js";
+import { stateDir } from "../state.js";
 
 const KEEP_SNAPSHOTS = 5;
 const MAX_PAGES = 500;
@@ -40,8 +40,7 @@ type Snapshot = {
 };
 
 export function snapshotDir(): string {
-  const stateHome = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
-  return join(stateHome, "clickup-mcp-extras", "snapshots");
+  return stateDir("snapshots");
 }
 
 /**

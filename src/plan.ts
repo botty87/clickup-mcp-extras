@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { appendFile, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { ClickUpError, request } from "./clickup-client.js";
+import { stateDir } from "./state.js";
 
 // A plan is a file of bulk ClickUp changes. An agent may write it and run
 // `check` (read-only); only a person at a terminal can `apply` it.
@@ -202,21 +202,18 @@ export type Io = {
   ask: (question: string) => Promise<string>;
 };
 
-export type Preview = {
-  hash: string;
-  drifted: number;
-  notified: string[];
-  calls: number;
-  tasks: Map<string, LiveTask>;
-};
+export type Preview = { hash: string; drifted: number; notified: string[]; calls: number };
 
 export function plansDir(): string {
-  const stateHome = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
-  return join(stateHome, "clickup-mcp-extras", "plans");
+  return stateDir("plans");
 }
 
 /** Read-only: validates against the live tasks and prints before → after. */
-export async function preview(plan: Plan, io: Io, opts: { allowLarge?: boolean } = {}): Promise<Preview> {
+export async function preview(
+  plan: Plan,
+  io: Io,
+  opts: { allowLarge?: boolean; done?: Set<number> } = {},
+): Promise<Preview> {
   if (plan.ops.length > LARGE_PLAN && !opts.allowLarge) {
     throw new Error(`Plan has ${plan.ops.length} operations (more than ${LARGE_PLAN}): pass --allow-large.`);
   }
@@ -236,6 +233,11 @@ export async function preview(plan: Plan, io: Io, opts: { allowLarge?: boolean }
   const simulated = new Map(tasks);
   plan.ops.forEach((op, i) => {
     const task = simulated.get(op.task_id)!;
+    if (opts.done?.has(i)) {
+      // Applied in an earlier run: the live task already reflects it.
+      io.out(`#${i + 1} ${op.op} ${op.task_id} "${task.name ?? ""}": already applied`);
+      return;
+    }
     simulated.set(op.task_id, simulate(op, task));
     const d = drift(op, task);
     if (d.length) drifted++;
@@ -251,13 +253,14 @@ export async function preview(plan: Plan, io: Io, opts: { allowLarge?: boolean }
   });
 
   // Preview reads, then a read before each non-comment op, then the writes.
-  const calls = tasks.size + plan.ops.filter((o) => o.op !== "comment").length + plan.ops.length;
+  const pending = plan.ops.filter((_, i) => !opts.done?.has(i));
+  const calls = tasks.size + pending.filter((o) => o.op !== "comment").length + pending.length;
   io.out(`operations: ${plan.ops.length}, tasks: ${tasks.size}, drifted: ${drifted}`);
   io.out(`notified (assignees and watchers): ${[...notified].sort().join(", ") || "none"}`);
   io.out(`REST calls for apply: about ${calls}, at most 100 per minute`);
   io.out(`hash: ${hash}`);
   io.out(`to apply, from your own terminal: node dist/cli.js apply <plan> --approve ${hash.slice(0, 8)}`);
-  return { hash, drifted, notified: [...notified], calls, tasks };
+  return { hash, drifted, notified: [...notified], calls };
 }
 
 type LogEntry = {
@@ -272,15 +275,19 @@ type LogEntry = {
   error?: string;
 };
 
-/** Log entries; a line cut short by a crash is skipped, any other bad line stops the run. */
-async function readLog(path: string): Promise<LogEntry[]> {
+/**
+ * Log entries; a last line cut short by a crash is skipped (truncated = true),
+ * any other bad line stops the run.
+ */
+async function readLog(path: string): Promise<{ entries: LogEntry[]; truncated: boolean }> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: [], truncated: false };
     throw err;
   }
+  const truncated = text.length > 0 && !text.endsWith("\n");
   const lines = text.split("\n").filter(Boolean);
   const entries: LogEntry[] = [];
   lines.forEach((line, i) => {
@@ -292,7 +299,7 @@ async function readLog(path: string): Promise<LogEntry[]> {
       }
     }
   });
-  return entries;
+  return { entries, truncated };
 }
 
 export type ApplyResult = { dir: string; applied: number; skipped: number; stopped?: string };
@@ -319,9 +326,8 @@ export async function apply(
   await chmod(dir, 0o700);
   await writeFile(join(dir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
   const logPath = join(dir, "apply-log.jsonl");
-  const previous = await readLog(logPath);
-  const raw = await readFile(logPath, "utf8").catch(() => "");
-  if (raw && !raw.endsWith("\n")) {
+  const { entries: previous, truncated } = await readLog(logPath);
+  if (truncated) {
     // The last line was cut short by a crash: drop it before appending, or the
     // next entry would be glued to it.
     const kept = previous.map((e) => `${JSON.stringify(e)}\n`).join("");
@@ -330,7 +336,7 @@ export async function apply(
   const done = new Set(previous.filter((e) => e.result === "ok").map((e) => e.index));
 
   io.out("Live preview:");
-  await preview(plan, io, opts);
+  await preview(plan, io, { ...opts, done });
   if (done.size) io.out(`${done.size} operation(s) already applied in a previous run will be skipped.`);
   const answer = (await io.ask(`Type the first 8 characters of the hash to apply: `)).trim();
   if (answer !== short) return { dir, applied: 0, skipped: 0, stopped: "not confirmed" };
@@ -377,25 +383,44 @@ export async function apply(
     }
   } finally {
     // Also on an unexpected error (a failed read, a lost connection), so the
-    // operations already applied can always be undone.
-    await writeRollback(plan, dir, short, await readLog(logPath));
+    // operations already applied can always be undone. A failure here is
+    // reported without hiding the error that ended the run.
+    try {
+      await writeRollback(plan, dir, short, (await readLog(logPath)).entries);
+    } catch (err) {
+      io.out(`WARNING: rollback not written: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   return { dir, applied, skipped, stopped };
 }
 
-/** A plan that undoes every "ok" operation, newest first; it goes through check/apply like any plan. */
+/**
+ * A plan that undoes every applied operation, newest first; it goes through
+ * check/apply like any plan. Operations of unknown outcome are not in it (their
+ * undo would stop the rollback as drift if the write never landed): the note
+ * says how to undo them by hand.
+ */
 async function writeRollback(plan: Plan, dir: string, short: string, entries: LogEntry[]): Promise<void> {
-  // "unknown" writes may have happened: undoing them is harmless if they did not,
-  // because the undo carries its own expected_before.
-  const ops = entries
-    .filter((e) => e.result === "ok" || e.result === "unknown")
-    .sort((a, b) => b.index - a.index)
-    .map((e) => (e.before ? inverse(plan.ops[e.index], e.before) : null))
+  // The last entry per operation wins: an op "unknown" in one run may be "ok" after a rerun.
+  const last = new Map<number, LogEntry>();
+  for (const e of entries) last.set(e.index, e);
+  const final = [...last.values()].sort((a, b) => b.index - a.index);
+
+  const ops = final
+    .filter((e) => e.result === "ok" && e.before)
+    .map((e) => inverse(plan.ops[e.index], e.before!))
     .filter((o): o is Op => o !== null);
-  const comments = entries.filter((e) => e.result === "ok" && e.comment_id).map((e) => `${e.task_id}:${e.comment_id}`);
+  const comments = final.filter((e) => e.result === "ok" && e.comment_id).map((e) => `${e.task_id}:${e.comment_id}`);
+  const uncertain = final
+    .filter((e) => e.result === "unknown")
+    .map((e) => {
+      const undo = e.before ? inverse(plan.ops[e.index], e.before) : null;
+      return `#${e.index + 1} ${e.op} on ${e.task_id}` + (undo ? ` (if it landed, undo with ${canonical(undo)})` : " (if it was posted, delete it by hand)");
+    });
   const note =
     `Rollback of plan ${short}.` +
-    (comments.length ? ` Comments cannot be undone (task:comment_id): ${comments.join(", ")}.` : "");
+    (comments.length ? ` Comments cannot be undone (task:comment_id): ${comments.join(", ")}.` : "") +
+    (uncertain.length ? ` Outcome unknown, check by hand: ${uncertain.join("; ")}.` : "");
   const path = join(dir, "rollback.json");
   if (ops.length === 0) {
     // A plan needs at least one op: with nothing to undo, leave a note instead.

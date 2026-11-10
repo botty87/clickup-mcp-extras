@@ -37,8 +37,8 @@ There is no delete, create, move or custom-field operation. Unknown fields are r
 
 - Runs one operation at a time: it reads the task, compares it with `expected_before`, writes, and logs the result.
 - Stops at the first drift (the task changed since the plan was written), logged as `stopped_drift`. `--skip-drift` skips drifted operations (`skipped_drift`) and goes on. `check` follows several operations on the same task in order, so a chain such as `in review` → `testing` → `done` is not reported as drift.
-- Stops on any error. After a timeout or a 5xx the outcome is unknown (logged as `unknown`): check the task before rerunning. For a comment this matters most, since a rerun may post it twice; a status or tag change of unknown outcome is still included in the rollback.
-- Running `apply` again on the same plan resumes: operations already applied are skipped. A log line cut short by a crash is dropped.
+- Stops on any error. After a timeout or a 5xx the outcome is unknown (logged as `unknown`): check the task before rerunning. For a comment this matters most, since a rerun may post it twice. An operation of unknown outcome is not in `rollback.json` (its undo would stop the rollback if the write never landed): the rollback `note` names it and says how to undo it by hand. A rerun that applies it turns it into a normal undo.
+- Running `apply` again on the same plan resumes: operations already applied are skipped and shown as `already applied` in the preview. A log line cut short by a crash is dropped.
 - Writes to `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/plans/<hash8>/`:
   - `plan.json`, the plan that was approved;
   - `apply-log.jsonl`, one line per operation with the state before it;
