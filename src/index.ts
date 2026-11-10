@@ -42,7 +42,7 @@ if (!process.env.CLICKUP_API_TOKEN) {
 const server = new McpServer(
   {
     name: "clickup-mcp-extras",
-    version: "0.4.0",
+    version: "0.5.0",
   },
   {
     capabilities: { tools: {} },

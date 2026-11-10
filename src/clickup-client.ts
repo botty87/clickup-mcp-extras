@@ -70,7 +70,7 @@ function pauseFor(ms: number): void {
  * per-token rate limit: pauses when X-RateLimit-Remaining runs low and, on a
  * 429 (request not executed), waits for the reset and retries.
  */
-async function clickupFetch(path: string, init: RequestInit): Promise<Response> {
+async function clickupFetch(path: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     // Loop: another response may extend the pause while this one sleeps.
     for (let d = pauseUntil - Date.now(); d > 0; d = pauseUntil - Date.now()) {
@@ -79,7 +79,10 @@ async function clickupFetch(path: string, init: RequestInit): Promise<Response> 
 
     const headers = new Headers(init.headers);
     headers.set("Authorization", getToken());
-    const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+    // The timeout covers the request only, started after any rate-limit pause,
+    // so a pause can never make it fire before anything is sent.
+    const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : init.signal;
+    const res = await fetch(`${BASE_URL}${path}`, { ...init, headers, signal });
 
     const reset = resetAt(res);
     const remaining = numericHeader(res, "x-ratelimit-remaining");
@@ -100,12 +103,13 @@ export async function request<T = unknown>(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
+  opts: { timeoutMs?: number } = {},
 ): Promise<T> {
   const res = await clickupFetch(path, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  }, opts.timeoutMs); // opt-in: a stalled connection then fails instead of hanging
 
   return parseResponse<T>(res, method, path);
 }
