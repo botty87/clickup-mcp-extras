@@ -390,3 +390,49 @@ test("Ctrl+C before confirming stops without writing and releases the lock", asy
   await assert.rejects(readFile(join(plansDir(), planHash(plan).slice(0, 8), "apply.lock"), "utf8"), /ENOENT/);
 });
 
+
+test("a SIGTERM while waiting at the prompt cancels the question", async () => {
+  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "add_tag", task_id: "a", args: { tag: "t" } }] });
+  const short = planHash(plan).slice(0, 8);
+  let reject;
+  const o = {
+    ...io(),
+    ask: () => {
+      setTimeout(() => process.emit("SIGTERM", "SIGTERM"), 10);
+      return new Promise((_, r) => (reject = r));
+    },
+    cancel: () => {
+      const e = new Error("aborted");
+      e.name = "AbortError";
+      reject(e);
+    },
+  };
+  const r = await apply(plan, o, { approve: short });
+  assert.match(r.stopped, /cancelled at the prompt|interrupted \(SIGTERM\)/);
+  assert.equal(writes.length, 0);
+});
+
+test("rollback-note.txt gives way to rollback.json once something is undoable", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "comment", task_id: "a", args: { text: "c" } },
+      { op: "add_tag", task_id: "a", args: { tag: "z" } },
+    ],
+  });
+  const short = planHash(plan).slice(0, 8);
+  const r = await apply(plan, io(short), { approve: short });
+  await assert.rejects(readFile(join(r.dir, "rollback-note.txt"), "utf8"), /ENOENT/);
+  const rollback = parsePlan(JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8")));
+  assert.equal(rollback.ops.length, 1);
+  assert.match(rollback.note, /a:4242/);
+});
+
+test("a status change with no previous status is named in the note", async () => {
+  delete tasks.a.status;
+  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "set_status", task_id: "a", args: { status: "done" } }] });
+  const short = planHash(plan).slice(0, 8);
+  const r = await apply(plan, io(short), { approve: short });
+  assert.match(await readFile(join(r.dir, "rollback-note.txt"), "utf8"), /no previous status.*#1 on a/);
+});

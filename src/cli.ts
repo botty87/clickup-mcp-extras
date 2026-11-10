@@ -38,8 +38,20 @@ async function main(argv: string[]): Promise<number> {
   }
   const { approve, "skip-drift": skipDrift, "allow-large": allowLarge } = parsed.values;
 
+  // A closed terminal (SIGHUP) makes stdout writes fail with EIO/EPIPE: ignore
+  // them so apply can still finish the current step and write its files.
+  process.stdout.on("error", () => {});
+  process.stderr.on("error", () => {});
+  let pending: AbortController | undefined;
   const io: Io = {
-    out: (line) => console.log(line),
+    out: (line) => {
+      try {
+        console.log(line);
+      } catch {
+        // output lost, the run goes on
+      }
+    },
+    cancel: () => pending?.abort(),
     isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     ask: async (question) => {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -48,11 +60,13 @@ async function main(argv: string[]): Promise<number> {
       // Ctrl+D (stdin closed) would leave the question pending forever, and the
       // process would exit without releasing the lock: abort it too.
       const abort = new AbortController();
+      pending = abort;
       rl.on("SIGINT", () => abort.abort());
       rl.on("close", () => abort.abort());
       try {
         return await rl.question(question, { signal: abort.signal });
       } finally {
+        pending = undefined;
         rl.close();
       }
     },

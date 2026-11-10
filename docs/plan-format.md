@@ -44,7 +44,7 @@ There is no delete, create, move or custom-field operation. Unknown fields are r
 - Each confirmed run writes to its own folder, `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/plans/<hash8>/run-<time>/`:
   - `plan.json`, the plan that was approved, written only after you confirm;
   - `apply-log.jsonl`, one line per operation with the state before it;
-  - `rollback.json`, a plan that undoes the run's writes, newest first, refreshed after every operation, so it exists even if the run is killed. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo, there is a `rollback-note.txt` instead.
+  - `rollback.json`, a plan that undoes the run's writes, newest first, refreshed after every operation, so it exists even if the run is killed. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo automatically, there is a `rollback-note.txt` instead: the run folder holds one or the other, never both. Both are written atomically.
 
 The terminal check and the typed hash guard against mistakes, not against an agent that drives a terminal on purpose: they are a brake, not a lock.
 

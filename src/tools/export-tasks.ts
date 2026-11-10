@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { join } from "node:path";
-import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { request } from "../clickup-client.js";
-import { stateDir } from "../state.js";
+import { stateDir, writeAtomic } from "../state.js";
 
 const KEEP_SNAPSHOTS = 5;
 const MAX_PAGES = 500;
@@ -43,20 +43,6 @@ export function snapshotDir(): string {
   return stateDir("snapshots");
 }
 
-/**
- * Write via a temp file in the same directory, then rename: readers never see
- * half a file. Owner-only (0600): snapshots hold the whole workspace.
- */
-async function writeAtomic(path: string, data: string): Promise<void> {
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    await writeFile(tmp, data, { mode: 0o600 });
-    await rename(tmp, path);
-  } catch (err) {
-    await rm(tmp, { force: true });
-    throw err;
-  }
-}
 
 /** Sorted, and empty treated as absent: the same filters always compare equal. */
 function normalizeIds(ids: string[] | undefined): string[] | null {

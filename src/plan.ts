@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { appendFile, chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { ClickUpError, request } from "./clickup-client.js";
-import { stateDir } from "./state.js";
+import { stateDir, writeAtomic } from "./state.js";
 
 // A plan is a file of bulk ClickUp changes. An agent may write it and run
 // `check` (read-only); only a person at a terminal can `apply` it.
@@ -214,6 +214,8 @@ export type Io = {
   isTTY: boolean;
   /** Asks the person at the terminal; returns their answer. */
   ask: (question: string) => Promise<string>;
+  /** Aborts a pending ask() (a signal arrived while waiting at the prompt). */
+  cancel?: () => void;
 };
 
 export type Preview = { hash: string; drifted: number; notified: string[]; calls: number };
@@ -338,7 +340,13 @@ export async function apply(
     const holder = Number((await readFile(lockPath, "utf8").catch(() => "")).trim());
     if (Number.isInteger(holder) && holder > 0 && !isAlive(holder)) {
       io.out(`Removing a stale lock left by process ${holder}.`);
-      await writeFile(lockPath, `${process.pid}\n`, { mode: 0o600 });
+      await rm(lockPath, { force: true });
+      // Exclusive again: if another apply took it over in the meantime, this fails.
+      try {
+        await writeFile(lockPath, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+      } catch {
+        throw new Error(`Another apply of this plan just took the lock: if none is running, delete ${lockPath}.`);
+      }
     } else {
       throw new Error(`Another apply of this plan is running (process ${holder || "?"}): if it is not, delete ${lockPath}.`);
     }
@@ -355,6 +363,7 @@ export async function apply(
     }
     signal.name = sig;
     io.out(`${sig}: stopping after the current step (press again to exit now)...`);
+    io.cancel?.(); // if waiting at the prompt, stop waiting
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
@@ -514,17 +523,27 @@ async function writeRollback(plan: Plan, dir: string, short: string, entries: Lo
       const undo = e.before ? inverse(plan.ops[e.index], e.before) : null;
       return `#${e.index + 1} ${e.op} on ${e.task_id}` + (undo ? ` (if it landed, undo with ${canonical(undo)})` : " (if it was posted, delete it by hand)");
     });
+  // A status change whose previous status could not be read has no automatic undo.
+  const noUndo = newestFirst
+    .filter((e) => e.result === "ok" && e.op === "set_status" && typeof e.before?.status !== "string")
+    .map((e) => `#${e.index + 1} on ${e.task_id}`);
   const note =
     `Rollback of plan ${short}.` +
     (comments.length ? ` Comments cannot be undone (task:comment_id): ${comments.join(", ")}.` : "") +
+    (noUndo.length ? ` Status changes with no previous status to restore, undo by hand: ${noUndo.join(", ")}.` : "") +
     (uncertain.length
       ? ` Outcome unknown, check by hand and undo these first if they landed, before applying this rollback: ${uncertain.join("; ")}.`
       : "");
+  // Exactly one of rollback.json / rollback-note.txt exists, never a stale mix.
+  const jsonPath = join(dir, "rollback.json");
+  const notePath = join(dir, "rollback-note.txt");
   if (ops.length === 0) {
     // A plan needs at least one op: with nothing to undo, leave a note instead.
-    await writeFile(join(dir, "rollback-note.txt"), `${note}\nNothing to undo.\n`, { mode: 0o600 });
+    await writeAtomic(notePath, `${note}\nNothing to undo automatically.\n`);
+    await rm(jsonPath, { force: true });
     return;
   }
   const rollback = { version: 1, team_id: plan.team_id, created_at: new Date().toISOString(), note, ops };
-  await writeFile(join(dir, "rollback.json"), JSON.stringify(rollback, null, 2), { mode: 0o600 });
+  await writeAtomic(jsonPath, JSON.stringify(rollback, null, 2));
+  await rm(notePath, { force: true });
 }
