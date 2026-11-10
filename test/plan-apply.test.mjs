@@ -322,3 +322,82 @@ test("on resume the preview marks done ops as already applied, not as drift", as
   assert.match(text, /#1 set_status a "Task A": already applied/);
   assert.match(text, /drifted: 0/);
 });
+
+test("an unknown write that did land keeps its undo after a rerun stops at drift", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [{ op: "set_status", task_id: "a", args: { status: "done" }, expected_before: { status: "in review" } }],
+  });
+  const short = planHash(plan).slice(0, 8);
+  // The PUT lands, but the response is lost: the fetch mock applies it, then fails.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if ((init.method ?? "GET") === "PUT") {
+      tasks.a.status = { status: "done" };
+      return new Response("gateway timeout", { status: 504 });
+    }
+    return realFetch(url, init);
+  };
+  try {
+    await apply(plan, io(short), { approve: short });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const rerun = await apply(plan, io(short), { approve: short });
+  assert.match(rerun.stopped, /drift at #1/);
+  const note = await readFile(join(rerun.dir, "rollback-note.txt"), "utf8");
+  assert.match(note, /Outcome unknown.*#1 set_status on a.*"in review"/);
+});
+
+test("a second apply of the same plan is refused while the first holds the lock", async () => {
+  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "comment", task_id: "a", args: { text: "once" } }] });
+  const short = planHash(plan).slice(0, 8);
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const first = apply(plan, { ...io(), ask: async () => (await gate, short) }, { approve: short });
+  await new Promise((r) => setTimeout(r, 50));
+  await assert.rejects(apply(plan, io(short), { approve: short }), /Another apply of this plan is running/);
+  release();
+  assert.equal((await first).applied, 1);
+  assert.equal(writes.length, 1);
+});
+
+test("plan.json is written only after confirmation", async () => {
+  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "add_tag", task_id: "a", args: { tag: "n" } }] });
+  const short = planHash(plan).slice(0, 8);
+  const r = await apply(plan, io("wrong"), { approve: short });
+  assert.equal(r.stopped, "not confirmed");
+  await assert.rejects(readFile(join(r.dir, "plan.json"), "utf8"), /ENOENT/);
+});
+
+test("rollback follows the order the writes ran across resumed runs", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "set_status", task_id: "a", args: { status: "testing" }, expected_before: { status: "to do" } },
+      { op: "set_status", task_id: "a", args: { status: "done" } },
+    ],
+  });
+  const short = planHash(plan).slice(0, 8);
+  await apply(plan, io(short), { approve: short, skipDrift: true }); // #1 skipped, #2: in review -> done
+  tasks.a.status = { status: "to do" };
+  await apply(plan, io(short), { approve: short }); // #1: to do -> testing
+  const rollback = parsePlan(JSON.parse(await readFile(join(plansDir(), short, "rollback.json"), "utf8")));
+  assert.deepEqual(
+    rollback.ops.map((o) => `${o.args.status}<-${o.expected_before.status}`),
+    ["to do<-testing", "in review<-done"],
+  );
+});
+
+test("tags are matched exactly, as the write sends them", async () => {
+  tasks.b.tags = [{ name: "blocked" }];
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [{ op: "remove_tag", task_id: "b", args: { tag: "Blocked" }, expected_before: { has_tag: true } }],
+  });
+  const p = await preview(plan, io());
+  assert.equal(p.drifted, 1);
+});

@@ -27,7 +27,7 @@ Run the commands from the install folder (`~/.local/share/clickup-mcp-extras`), 
 | `op` | `args` | `expected_before` (optional) | Undo |
 |---|---|---|---|
 | `set_status` | `status`: the status name as shown in ClickUp | `status` | back to the previous status |
-| `add_tag` | `tag`: an existing tag name | `has_tag` | `remove_tag` |
+| `add_tag` | `tag`: an existing tag name, with its exact case | `has_tag` | `remove_tag` |
 | `remove_tag` | `tag` | `has_tag` | `add_tag` |
 | `comment` | `text`: plain text | — | none: a comment and its notifications cannot be taken back |
 
@@ -35,13 +35,16 @@ There is no delete, create, move or custom-field operation. Unknown fields are r
 
 ## What apply does
 
+- Takes a lock (`apply.lock` in the plan folder), so the same plan cannot be applied twice at once. If a run crashed, delete the lock by hand.
 - Runs one operation at a time: it reads the task, compares it with `expected_before`, writes, and logs the result.
 - Stops at the first drift (the task changed since the plan was written), logged as `stopped_drift`. `--skip-drift` skips drifted operations (`skipped_drift`) and goes on. `check` follows several operations on the same task in order, so a chain such as `in review` → `testing` → `done` is not reported as drift.
 - Stops on any error. After a timeout or a 5xx the outcome is unknown (logged as `unknown`): check the task before rerunning. For a comment this matters most, since a rerun may post it twice. An operation of unknown outcome is not in `rollback.json` (its undo would stop the rollback if the write never landed): the rollback `note` names it and says how to undo it by hand. A rerun that applies it turns it into a normal undo.
 - Running `apply` again on the same plan resumes: operations already applied are skipped and shown as `already applied` in the preview. A log line cut short by a crash is dropped.
 - Writes to `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/plans/<hash8>/`:
-  - `plan.json`, the plan that was approved;
+  - `plan.json`, the plan that was approved, written only after you confirm;
   - `apply-log.jsonl`, one line per operation with the state before it;
-  - `rollback.json`, a plan that undoes the applied operations in reverse order, written even when a run stops on an error. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo (only comments, or nothing applied) there is a `rollback-note.txt` instead.
+  - `rollback.json`, a plan that undoes the applied operations, newest write first (across resumed runs too), written even when a run stops on an error. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo (only comments, or nothing applied) there is a `rollback-note.txt` instead.
+
+The terminal check and the typed hash guard against mistakes, not against an agent that drives a terminal on purpose: they are a brake, not a lock.
 
 Changes are made as the owner of the token: assignees and watchers get ClickUp's usual notifications. Status changes can also trigger the workspace's Automations, which a rollback does not undo.

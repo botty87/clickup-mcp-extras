@@ -89,8 +89,9 @@ export async function getTask(taskId: string): Promise<LiveTask> {
   return request<LiveTask>("GET", `/task/${encodeURIComponent(taskId)}`);
 }
 
-const hasTag = (task: LiveTask, tag: string) =>
-  (task.tags ?? []).some((t) => t.name?.toLowerCase() === tag.toLowerCase());
+// Exact match: the write sends the plan's tag name as is, so the check must
+// compare the same string or it could pass for a tag the write never touches.
+const hasTag = (task: LiveTask, tag: string) => (task.tags ?? []).some((t) => t.name === tag);
 
 /** The part of a task's state an operation reads and changes. */
 export function stateFor(op: Op, task: LiveTask): Record<string, unknown> {
@@ -126,7 +127,7 @@ export function simulate(op: Op, task: LiveTask): LiveTask {
     case "add_tag":
       return hasTag(task, op.args.tag) ? task : { ...task, tags: [...(task.tags ?? []), { name: op.args.tag }] };
     case "remove_tag":
-      return { ...task, tags: (task.tags ?? []).filter((t) => t.name?.toLowerCase() !== op.args.tag.toLowerCase()) };
+      return { ...task, tags: (task.tags ?? []).filter((t) => t.name !== op.args.tag) };
     case "comment":
       return task;
   }
@@ -324,7 +325,28 @@ export async function apply(
   const dir = join(plansDir(), short);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
-  await writeFile(join(dir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
+
+  // One apply per plan at a time: two runs would both replay the pending ops.
+  const lockPath = join(dir, "apply.lock");
+  try {
+    await writeFile(lockPath, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+  } catch {
+    throw new Error(`Another apply of this plan is running, or one crashed: if none is running, delete ${lockPath}.`);
+  }
+  try {
+    return await applyLocked(plan, io, opts, dir, short);
+  } finally {
+    await rm(lockPath, { force: true });
+  }
+}
+
+async function applyLocked(
+  plan: Plan,
+  io: Io,
+  opts: { skipDrift?: boolean; allowLarge?: boolean },
+  dir: string,
+  short: string,
+): Promise<ApplyResult> {
   const logPath = join(dir, "apply-log.jsonl");
   const { entries: previous, truncated } = await readLog(logPath);
   if (truncated) {
@@ -340,6 +362,7 @@ export async function apply(
   if (done.size) io.out(`${done.size} operation(s) already applied in a previous run will be skipped.`);
   const answer = (await io.ask(`Type the first 8 characters of the hash to apply: `)).trim();
   if (answer !== short) return { dir, applied: 0, skipped: 0, stopped: "not confirmed" };
+  await writeFile(join(dir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
 
   const log = async (e: Omit<LogEntry, "ts">) =>
     appendFile(logPath, `${JSON.stringify({ ts: new Date().toISOString(), ...e })}\n`, { mode: 0o600 });
@@ -376,7 +399,9 @@ export async function apply(
         await log({ ...base, result: unknown ? "unknown" : "error", before, error: msg });
         stopped = unknown
           ? `#${index + 1} ${op.op}: the outcome is unknown (${msg}). Check the task before rerunning` +
-            (op.op === "comment" ? ", or the comment may be posted twice." : "; rollback.json includes its undo.")
+            (op.op === "comment"
+              ? ", or the comment may be posted twice."
+              : "; the rollback note says how to undo it if it landed.")
           : `#${index + 1} failed: ${msg}`;
         break;
       }
@@ -401,10 +426,22 @@ export async function apply(
  * says how to undo them by hand.
  */
 async function writeRollback(plan: Plan, dir: string, short: string, entries: LogEntry[]): Promise<void> {
-  // The last entry per operation wins: an op "unknown" in one run may be "ok" after a rerun.
-  const last = new Map<number, LogEntry>();
-  for (const e of entries) last.set(e.index, e);
-  const final = [...last.values()].sort((a, b) => b.index - a.index);
+  // One outcome per operation across all runs. `before` is the state before the
+  // first attempt, so an op that landed as "unknown" and was rerun is still
+  // undone to where it started. `order` is when it last ran, so the undo follows
+  // the order the writes happened, not the plan order.
+  type Outcome = { index: number; op: Op["op"]; task_id: string; result: "ok" | "unknown"; before?: Record<string, unknown>; comment_id?: string; order: number };
+  const per = new Map<number, Outcome>();
+  entries.forEach((e, order) => {
+    if (e.result !== "ok" && e.result !== "unknown") return;
+    const cur = per.get(e.index);
+    if (!cur) {
+      per.set(e.index, { index: e.index, op: e.op, task_id: e.task_id, result: e.result, before: e.before, comment_id: e.comment_id, order });
+    } else if (e.result === "ok") {
+      Object.assign(cur, { result: "ok", comment_id: e.comment_id ?? cur.comment_id, order });
+    }
+  });
+  const final = [...per.values()].sort((a, b) => b.order - a.order);
 
   const ops = final
     .filter((e) => e.result === "ok" && e.before)

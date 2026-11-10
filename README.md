@@ -35,7 +35,7 @@ jq '[.tasks[] | select(.status.status == "in progress") | {id, name}]' ~/.local/
 Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. Only a whole-workspace export (no space/list filters, closed tasks and subtasks included) updates `latest.json` and is compared with the previous one; a filtered export writes a `filtered-*.json` file, and each kind keeps its own last 5. ClickUp pages by offset, so a task created, deleted or moved while an export runs can be missed and appear among the missing IDs: rerun the export to confirm. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
 
 ### Bulk changes (plan / check / apply)
-Bulk status, tag and comment changes go through a plan file and a command-line tool, not through MCP calls, so they skip the official MCP's daily cap and need a person to approve them:
+Bulk status, tag and comment changes go through a plan file and a command-line tool, not through MCP calls, so they skip the official MCP's daily cap, and applying one asks for confirmation in a terminal:
 
 ```sh
 node ~/.local/share/clickup-mcp-extras/dist/cli.js check plan.json          # read-only preview, prints the hash
