@@ -267,7 +267,7 @@ export async function preview(
   // Preview reads, then a read before each non-comment op, then the writes.
   const calls = tasks.size + plan.ops.filter((o) => o.op !== "comment").length + plan.ops.length;
   io.out(`operations: ${plan.ops.length}, tasks: ${tasks.size}, drifted: ${drifted}`);
-  io.out(`notified (assignees and watchers): ${[...notified].sort().join(", ") || "none"}`);
+  io.out(`people on the tasks that change (assignees and watchers; who is notified depends on ClickUp settings): ${[...notified].sort().join(", ") || "none"}`);
   io.out(`REST calls for apply: about ${calls}, at most 100 per minute`);
   io.out(`hash: ${hash}`);
   io.out(`to apply, from your own terminal: node dist/cli.js apply <plan> --approve ${hash.slice(0, 8)}`);
@@ -308,7 +308,7 @@ export async function apply(
   if (!io.isTTY) throw new Error("apply needs an interactive terminal: run it yourself, not from an agent.");
   const hash = planHash(plan);
   const short = hash.slice(0, 8);
-  if (!opts.approve || opts.approve !== short) {
+  if (!opts.approve || opts.approve.trim().toLowerCase() !== short) {
     throw new Error(`--approve must be the first 8 characters of the plan hash (run check to see it).`);
   }
 
@@ -329,8 +329,13 @@ export async function apply(
   // lock is released and the rollback covers everything written.
   const signal = { name: undefined as string | undefined };
   const onSignal = (sig: NodeJS.Signals) => {
+    if (signal.name) {
+      // Second signal: the person wants out now. Leave the lock: a run was cut mid-way.
+      io.out(`${sig} again: exiting now. Check the log, then delete ${lockPath}.`);
+      process.exit(130);
+    }
     signal.name = sig;
-    io.out(`${sig}: stopping after the current step...`);
+    io.out(`${sig}: stopping after the current step (press again to exit now)...`);
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
@@ -372,10 +377,10 @@ async function applyLocked(
   } catch (err) {
     // Ctrl+C at the prompt reaches readline, which aborts the question.
     if (err instanceof Interrupted) return notConfirmed(`interrupted (${err.signalName}) before writing`);
-    if (err instanceof Error && err.name === "AbortError") return notConfirmed("interrupted (SIGINT) before writing");
+    if (err instanceof Error && err.name === "AbortError") return notConfirmed("cancelled at the prompt (Ctrl+C or Ctrl+D)");
     throw err;
   }
-  if (answer !== short) return notConfirmed("not confirmed");
+  if (answer.toLowerCase() !== short) return notConfirmed("not confirmed");
 
   // Each confirmed run gets its own folder.
   const runDir = join(dir, `run-${new Date().toISOString().replace(/[:.]/g, "-")}`);
@@ -483,7 +488,9 @@ async function writeRollback(plan: Plan, dir: string, short: string, entries: Lo
   const note =
     `Rollback of plan ${short}.` +
     (comments.length ? ` Comments cannot be undone (task:comment_id): ${comments.join(", ")}.` : "") +
-    (uncertain.length ? ` Outcome unknown, check by hand: ${uncertain.join("; ")}.` : "");
+    (uncertain.length
+      ? ` Outcome unknown, check by hand and undo these first if they landed, before applying this rollback: ${uncertain.join("; ")}.`
+      : "");
   if (ops.length === 0) {
     // A plan needs at least one op: with nothing to undo, leave a note instead.
     await writeFile(join(dir, "rollback-note.txt"), `${note}\nNothing to undo.\n`, { mode: 0o600 });

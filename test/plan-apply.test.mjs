@@ -303,7 +303,7 @@ test("Ctrl+C at the prompt (aborted question) stops cleanly and releases the loc
     throw e;
   };
   const r = await apply(plan, { ...io(), ask }, { approve: short });
-  assert.equal(r.stopped, "interrupted (SIGINT) before writing");
+  assert.equal(r.stopped, "cancelled at the prompt (Ctrl+C or Ctrl+D)");
   assert.equal(writes.length, 0);
   await assert.rejects(readFile(join(plansDir(), short, "apply.lock"), "utf8"), /ENOENT/);
 });

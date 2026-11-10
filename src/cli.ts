@@ -45,8 +45,11 @@ async function main(argv: string[]): Promise<number> {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       // Ctrl+C at the prompt reaches readline, not the process: abort the
       // question so apply unwinds and releases its lock.
+      // Ctrl+D (stdin closed) would leave the question pending forever, and the
+      // process would exit without releasing the lock: abort it too.
       const abort = new AbortController();
       rl.on("SIGINT", () => abort.abort());
+      rl.on("close", () => abort.abort());
       try {
         return await rl.question(question, { signal: abort.signal });
       } finally {
