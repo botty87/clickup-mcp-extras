@@ -89,9 +89,10 @@ export async function getTask(taskId: string): Promise<LiveTask> {
   return request<LiveTask>("GET", `/task/${encodeURIComponent(taskId)}`);
 }
 
-// Exact match: the write sends the plan's tag name as is, so the check must
-// compare the same string or it could pass for a tag the write never touches.
-const hasTag = (task: LiveTask, tag: string) => (task.tags ?? []).some((t) => t.name === tag);
+// ClickUp tag names are case-insensitive and come back lowercased, so tags are
+// compared in lowercase and written in lowercase (see write()).
+const tagKey = (tag: string) => tag.toLowerCase();
+const hasTag = (task: LiveTask, tag: string) => (task.tags ?? []).some((t) => t.name !== undefined && tagKey(t.name) === tagKey(tag));
 
 /** The part of a task's state an operation reads and changes. */
 export function stateFor(op: Op, task: LiveTask): Record<string, unknown> {
@@ -127,7 +128,7 @@ export function simulate(op: Op, task: LiveTask): LiveTask {
     case "add_tag":
       return hasTag(task, op.args.tag) ? task : { ...task, tags: [...(task.tags ?? []), { name: op.args.tag }] };
     case "remove_tag":
-      return { ...task, tags: (task.tags ?? []).filter((t) => t.name !== op.args.tag) };
+      return { ...task, tags: (task.tags ?? []).filter((t) => t.name === undefined || tagKey(t.name) !== tagKey(op.args.tag)) };
     case "comment":
       return task;
   }
@@ -174,10 +175,10 @@ export async function write(op: Op): Promise<{ comment_id?: string }> {
       await request("PUT", task, { status: op.args.status });
       return {};
     case "add_tag":
-      await request("POST", `${task}/tag/${encodeURIComponent(op.args.tag)}`);
+      await request("POST", `${task}/tag/${encodeURIComponent(tagKey(op.args.tag))}`);
       return {};
     case "remove_tag":
-      await request("DELETE", `${task}/tag/${encodeURIComponent(op.args.tag)}`);
+      await request("DELETE", `${task}/tag/${encodeURIComponent(tagKey(op.args.tag))}`);
       return {};
     case "comment": {
       const res = await request<{ id?: string | number }>("POST", `${task}/comment`, {
@@ -239,9 +240,11 @@ export async function preview(
       io.out(`#${i + 1} ${op.op} ${op.task_id} "${task.name ?? ""}": already applied`);
       return;
     }
-    simulated.set(op.task_id, simulate(op, task));
     const d = drift(op, task);
     if (d.length) drifted++;
+    // A drifted op is not applied (apply stops, or skips it with --skip-drift),
+    // so later ops on the task are checked against the state without it.
+    else simulated.set(op.task_id, simulate(op, task));
     for (const p of [...(task.assignees ?? []), ...(task.watchers ?? [])]) {
       const who = p.username ?? p.email;
       if (who) notified.add(who);
@@ -280,7 +283,7 @@ type LogEntry = {
  * Log entries; a last line cut short by a crash is skipped (truncated = true),
  * any other bad line stops the run.
  */
-async function readLog(path: string): Promise<{ entries: LogEntry[]; truncated: boolean }> {
+async function readLog(path: string): Promise<{ entries: LogEntry[]; truncated: boolean; partial?: string }> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -291,16 +294,23 @@ async function readLog(path: string): Promise<{ entries: LogEntry[]; truncated: 
   const truncated = text.length > 0 && !text.endsWith("\n");
   const lines = text.split("\n").filter(Boolean);
   const entries: LogEntry[] = [];
+  let partial: string | undefined;
   lines.forEach((line, i) => {
+    let entry: Partial<LogEntry> | undefined;
     try {
-      entries.push(JSON.parse(line) as LogEntry);
+      entry = JSON.parse(line) as Partial<LogEntry>;
     } catch {
-      if (i !== lines.length - 1 || text.endsWith("\n")) {
-        throw new Error(`${path} line ${i + 1} is not valid JSON: fix or move the log before applying again.`);
+      if (i === lines.length - 1 && truncated) {
+        partial = line;
+        return;
       }
     }
+    if (!entry || typeof entry.index !== "number" || typeof entry.result !== "string") {
+      throw new Error(`${path} line ${i + 1} is not a valid log entry: fix or move the log before applying again.`);
+    }
+    entries.push(entry as LogEntry);
   });
-  return { entries, truncated };
+  return { entries, truncated, partial };
 }
 
 export type ApplyResult = { dir: string; applied: number; skipped: number; stopped?: string };
@@ -330,7 +340,8 @@ export async function apply(
   const lockPath = join(dir, "apply.lock");
   try {
     await writeFile(lockPath, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     throw new Error(`Another apply of this plan is running, or one crashed: if none is running, delete ${lockPath}.`);
   }
   try {
@@ -348,18 +359,33 @@ async function applyLocked(
   short: string,
 ): Promise<ApplyResult> {
   const logPath = join(dir, "apply-log.jsonl");
-  const { entries: previous, truncated } = await readLog(logPath);
+  const { entries: previous, truncated, partial } = await readLog(logPath);
   if (truncated) {
-    // The last line was cut short by a crash: drop it before appending, or the
-    // next entry would be glued to it.
-    const kept = previous.map((e) => `${JSON.stringify(e)}\n`).join("");
-    await writeFile(logPath, kept, { mode: 0o600 });
+    // The last line was cut short by a crash. Lines are written right after a
+    // write returns, so that write may have landed: record it as "unknown"
+    // (shown below before confirming), then rewrite the log so new lines are
+    // not glued to the broken one.
+    const index = Number(partial?.match(/"index":(\d+)/)?.[1]);
+    const op = Number.isInteger(index) ? plan.ops[index] : undefined;
+    if (op) {
+      previous.push({ ts: new Date().toISOString(), index, op: op.op, task_id: op.task_id, result: "unknown", error: "log line cut short by a crash" });
+    }
+    await writeFile(logPath, previous.map((e) => `${JSON.stringify(e)}\n`).join(""), { mode: 0o600 });
   }
   const done = new Set(previous.filter((e) => e.result === "ok").map((e) => e.index));
 
   io.out("Live preview:");
   await preview(plan, io, { ...opts, done });
   if (done.size) io.out(`${done.size} operation(s) already applied in a previous run will be skipped.`);
+  const lastByIndex = new Map(previous.map((e) => [e.index, e] as const));
+  for (const e of lastByIndex.values()) {
+    if (e.result === "unknown") {
+      io.out(
+        `WARNING: #${e.index + 1} ${e.op} on ${e.task_id} has an unknown outcome from a previous run and will run again` +
+          (e.op === "comment" ? ": check the task first, or the comment may be posted twice." : "."),
+      );
+    }
+  }
   const answer = (await io.ask(`Type the first 8 characters of the hash to apply: `)).trim();
   if (answer !== short) return { dir, applied: 0, skipped: 0, stopped: "not confirmed" };
   await writeFile(join(dir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
@@ -370,8 +396,21 @@ async function applyLocked(
   let applied = 0;
   let skipped = 0;
   let stopped: string | undefined;
+  // Ctrl+C or a kill during the writes: finish the current op, then stop, so
+  // the lock is released and rollback.json covers everything written.
+  let interrupted: string | undefined;
+  const onSignal = (sig: NodeJS.Signals) => {
+    interrupted = sig;
+    io.out(`${sig}: stopping after the current operation...`);
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   try {
     for (const [index, op] of plan.ops.entries()) {
+      if (interrupted) {
+        stopped = `interrupted (${interrupted}) before #${index + 1}`;
+        break;
+      }
       if (done.has(index)) continue;
       const base = { index, op: op.op, task_id: op.task_id };
       // A comment has no state to compare, so it needs no read before writing.
@@ -407,6 +446,8 @@ async function applyLocked(
       }
     }
   } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
     // Also on an unexpected error (a failed read, a lost connection), so the
     // operations already applied can always be undone. A failure here is
     // reported without hiding the error that ended the run.

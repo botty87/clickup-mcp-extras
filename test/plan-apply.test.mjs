@@ -254,9 +254,11 @@ test("a log line cut short by a crash is skipped and done ops are not repeated",
     join(dir, "apply-log.jsonl"),
     JSON.stringify({ ts: "t", index: 0, op: "comment", task_id: "a", result: "ok", before: {} }) + '\n{"ts":"t","index":1,"op":"add',
   );
-  const r = await apply(plan, io(short), { approve: short });
+  const o = io(short);
+  const r = await apply(plan, o, { approve: short });
   assert.equal(r.applied, 1);
   assert.deepEqual(writes.map((w) => w.path), ["/task/b/tag/x"]);
+  assert.match(o.lines.join("\n"), /WARNING: #2 add_tag on b has an unknown outcome/);
 });
 
 test("rollback.json is written even when a read fails mid-run", async () => {
@@ -391,13 +393,44 @@ test("rollback follows the order the writes ran across resumed runs", async () =
   );
 });
 
-test("tags are matched exactly, as the write sends them", async () => {
+test("tags compare case-insensitively and are written in lowercase", async () => {
   tasks.b.tags = [{ name: "blocked" }];
   const plan = parsePlan({
     version: 1,
     team_id: TEAM,
     ops: [{ op: "remove_tag", task_id: "b", args: { tag: "Blocked" }, expected_before: { has_tag: true } }],
   });
-  const p = await preview(plan, io());
-  assert.equal(p.drifted, 1);
+  assert.equal((await preview(plan, io())).drifted, 0);
+  const short = planHash(plan).slice(0, 8);
+  await apply(plan, io(short), { approve: short });
+  assert.deepEqual(writes.map((w) => `${w.method} ${w.path}`), ["DELETE /task/b/tag/blocked"]);
+});
+
+test("Ctrl+C during the writes stops after the current op, releases the lock and writes the rollback", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "add_tag", task_id: "a", args: { tag: "one" } },
+      { op: "add_tag", task_id: "b", args: { tag: "two" } },
+    ],
+  });
+  const short = planHash(plan).slice(0, 8);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const res = await realFetch(url, init);
+    if ((init.method ?? "GET") === "POST") process.emit("SIGINT", "SIGINT");
+    return res;
+  };
+  let r;
+  try {
+    r = await apply(plan, io(short), { approve: short });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(r.applied, 1);
+  assert.match(r.stopped, /interrupted \(SIGINT\) before #2/);
+  await assert.rejects(readFile(join(r.dir, "apply.lock"), "utf8"), /ENOENT/);
+  const rollback = parsePlan(JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8")));
+  assert.deepEqual(rollback.ops.map((o) => `${o.op} ${o.task_id}`), ["remove_tag a"]);
 });

@@ -48,7 +48,8 @@
       "Read(~/**/clickup-mcp-extras/.env)",
       "Bash(*api.clickup.com*)",
       "Bash(*clickup-mcp-extras/.env*)",
-      "Bash(*cli.* apply *)"
+      "Bash(*cli.js apply*)",
+      "Bash(*cli.ts apply*)"
     ]
   }
 }

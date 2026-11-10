@@ -27,6 +27,7 @@ const MAX_WAIT_MS = 70_000;
 // ClickUp's rate-limit window is one minute. Used when a 429 carries no usable
 // reset: missing, or already past because the local clock runs ahead.
 const WINDOW_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 60_000;
 
 // Earliest time the next request may go out, shared by every call in this
 // process. Other processes using the same token are not coordinated: they can
@@ -79,7 +80,13 @@ async function clickupFetch(path: string, init: RequestInit): Promise<Response> 
 
     const headers = new Headers(init.headers);
     headers.set("Authorization", getToken());
-    const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+    // A stalled connection fails after REQUEST_TIMEOUT_MS instead of hanging;
+    // for a write that counts as an unknown outcome (not a ClickUpError).
+    const res = await fetch(`${BASE_URL}${path}`, {
+      ...init,
+      headers,
+      signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
 
     const reset = resetAt(res);
     const remaining = numericHeader(res, "x-ratelimit-remaining");
