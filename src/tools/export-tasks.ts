@@ -168,6 +168,9 @@ export async function handleExportTasks(input: ExportTasksInput) {
     removed = "no previous snapshot";
   } else if (previous.team_id !== teamId) {
     removed = "previous snapshot is from another workspace";
+  } else if (JSON.stringify(previous.params) !== JSON.stringify(params)) {
+    // A latest.json written by an older build may come from a filtered export.
+    removed = "previous snapshot used different filters";
   } else {
     const now = new Set(tasks.map((t) => t.id));
     const gone = previous.tasks.map((t) => t.id).filter((id) => !now.has(id));

@@ -38,7 +38,7 @@ Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshot
 Every request goes through one wrapper that reads `X-RateLimit-Remaining` / `X-RateLimit-Reset`: it pauses when fewer than 10 requests are left and, on a 429, waits for the reset and retries up to 3 times.
 
 ### Read-only sessions
-`docs/audit-settings.json` denies every write tool of the official ClickUp MCP (including `clickup_execute_operator`, whose bulk reads `export_tasks` replaces) and of this server, reading the `.env`, and shell calls to `api.clickup.com`. Start a session that must not change ClickUp with:
+`docs/audit-settings.json` denies every write tool of the official ClickUp MCP as exposed by the claude.ai connector (tool names `mcp__claude_ai_ClickUp__*`; if you added the server under another name, change that prefix) (including `clickup_execute_operator`, whose bulk reads `export_tasks` replaces) and of this server, reading the `.env`, and shell calls to `api.clickup.com`. Start a session that must not change ClickUp with:
 
 ```sh
 claude --settings ~/.local/share/clickup-mcp-extras/docs/audit-settings.json

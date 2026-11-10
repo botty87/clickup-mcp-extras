@@ -51,9 +51,13 @@ function resetAt(res: Response): number | undefined {
   return raw > 1e12 ? raw : raw * 1000;
 }
 
-function waitUntil(at: number | undefined, fallbackMs: number): number {
-  const ms = at === undefined ? fallbackMs : at - Date.now() + 1000;
-  return Math.min(Math.max(ms, 0), MAX_WAIT_MS);
+/**
+ * How long to wait for the rate-limit window to reopen: until the reset (+1 s),
+ * or a full window when the reset is missing or already past (local clock ahead).
+ */
+function windowWait(reset: number | undefined): number {
+  if (reset === undefined || reset <= Date.now()) return WINDOW_MS;
+  return Math.min(reset - Date.now() + 1000, MAX_WAIT_MS);
 }
 
 /** Never shorten a pause another response already set. */
@@ -80,13 +84,13 @@ async function clickupFetch(path: string, init: RequestInit): Promise<Response> 
     const reset = resetAt(res);
     const remaining = numericHeader(res, "x-ratelimit-remaining");
     if (remaining !== undefined && remaining < LOW_REMAINING) {
-      pauseFor(waitUntil(reset, WINDOW_MS));
+      pauseFor(windowWait(reset));
     }
 
     if (res.status !== 429) return res;
     // Pause even when giving up, so the next call does not go straight back
     // into the same exhausted window.
-    pauseFor(reset !== undefined && reset > Date.now() ? waitUntil(reset, WINDOW_MS) : WINDOW_MS);
+    pauseFor(windowWait(reset));
     if (attempt >= MAX_429_RETRIES) return res;
     await res.body?.cancel();
   }
