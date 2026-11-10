@@ -21,18 +21,89 @@ function getToken(): string {
   return token;
 }
 
+const MAX_429_RETRIES = 3;
+const LOW_REMAINING = 10;
+const MAX_WAIT_MS = 70_000;
+// ClickUp's rate-limit window is one minute. Used when a 429 carries no usable
+// reset: missing, or already past because the local clock runs ahead.
+const WINDOW_MS = 60_000;
+
+// Earliest time the next request may go out, shared by every call in this
+// process. Other processes using the same token are not coordinated: they can
+// read the same X-RateLimit-Remaining and overshoot together, and the 429
+// retry below is what absorbs that.
+let pauseUntil = 0;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Numeric header value, or undefined when the header is missing or not a number. */
+function numericHeader(res: Response, name: string): number | undefined {
+  const raw = res.headers.get(name);
+  if (raw === null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Epoch ms of X-RateLimit-Reset (documented as a Unix timestamp), if present. */
+function resetAt(res: Response): number | undefined {
+  const raw = numericHeader(res, "x-ratelimit-reset");
+  if (raw === undefined || raw <= 0) return undefined;
+  return raw > 1e12 ? raw : raw * 1000;
+}
+
+/**
+ * How long to wait for the rate-limit window to reopen: until the reset (+1 s),
+ * or a full window when the reset is missing or already past (local clock ahead).
+ */
+function windowWait(reset: number | undefined): number {
+  if (reset === undefined || reset <= Date.now()) return WINDOW_MS;
+  return Math.min(reset - Date.now() + 1000, MAX_WAIT_MS);
+}
+
+/** Never shorten a pause another response already set. */
+function pauseFor(ms: number): void {
+  pauseUntil = Math.max(pauseUntil, Date.now() + ms);
+}
+
+/**
+ * The single place where this server talks to ClickUp. Keeps under the
+ * per-token rate limit: pauses when X-RateLimit-Remaining runs low and, on a
+ * 429 (request not executed), waits for the reset and retries.
+ */
+async function clickupFetch(path: string, init: RequestInit): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    // Loop: another response may extend the pause while this one sleeps.
+    for (let d = pauseUntil - Date.now(); d > 0; d = pauseUntil - Date.now()) {
+      await sleep(d);
+    }
+
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", getToken());
+    const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+
+    const reset = resetAt(res);
+    const remaining = numericHeader(res, "x-ratelimit-remaining");
+    if (remaining !== undefined && remaining < LOW_REMAINING) {
+      pauseFor(windowWait(reset));
+    }
+
+    if (res.status !== 429) return res;
+    // Pause even when giving up, so the next call does not go straight back
+    // into the same exhausted window.
+    pauseFor(windowWait(reset));
+    if (attempt >= MAX_429_RETRIES) return res;
+    await res.body?.cancel();
+  }
+}
+
 export async function request<T = unknown>(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const url = `${BASE_URL}${path}`;
-  const res = await fetch(url, {
+  const res = await clickupFetch(path, {
     method,
-    headers: {
-      Authorization: getToken(),
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
@@ -79,10 +150,6 @@ export async function uploadTaskAttachment(
   form.append("attachment", new Blob([new Uint8Array(data)], { type: mimeType }), fileName);
 
   const path = `/task/${encodeURIComponent(taskId)}/attachment`;
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: "POST",
-    headers: { Authorization: getToken() },
-    body: form,
-  });
+  const res = await clickupFetch(path, { method: "POST", body: form });
   return parseResponse<UploadedAttachment>(res, "POST", path);
 }

@@ -5,7 +5,7 @@ MCP server locale che aggiunge a Claude Code i tool ClickUp con **@-mention real
 ## Prerequisiti
 
 - macOS o Linux (su Windows: WSL2 funziona)
-- **Node.js ≥ 18** (verifica con `node --version`)
+- **Node.js ≥ 22** (verifica con `node --version`)
 - **Claude Code CLI** installato (`claude --version`)
 - Account ClickUp con accesso al workspace dove serviranno le mention
 

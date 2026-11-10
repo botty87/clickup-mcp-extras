@@ -1,6 +1,6 @@
 # clickup-mcp-extras
 
-Local MCP server exposing ClickUp comment tools built from structured blocks (text, @-mentions, inline images), complementing the official ClickUp MCP (`https://mcp.clickup.com/mcp`).
+Local MCP server exposing ClickUp comment tools built from structured blocks (text, @-mentions, inline images) and a bulk task export, complementing the official ClickUp MCP (`https://mcp.clickup.com/mcp`).
 
 ## Why
 
@@ -23,7 +23,32 @@ Image blocks (`{ "type": "image", "file_path": "/abs/path.png", "width": 300 }`)
 
 > Clearing the parent (promoting a subtask to standalone) is **not supported** by ClickUp REST API v2 — `parent: null` returns 200 but is silently ignored. Not a wrapper limitation.
 
+### Bulk export (read-only)
+- `export_tasks` — read the tasks of a workspace (closed and subtasks included by default, optional `space_ids` / `list_ids` filters; archived tasks are not returned by ClickUp's team endpoint) through the REST API and save it as a local JSON snapshot
+
+The official MCP counts every call, reads included, against a daily cap shared by the workspace (300 per 24 h on the Core plan). This tool uses the REST API with your personal token instead: about one request per 100 tasks, limited only by the per-token rate limit (100 requests/min on most plans). The full tasks never enter the conversation: the tool returns the snapshot path, counts by status, assignee and list, and the IDs missing since the previous snapshot (deleted, archived, moved or no longer visible). Query the file from the shell:
+
+```sh
+jq '[.tasks[] | select(.status.status == "in progress") | {id, name}]' ~/.local/state/clickup-mcp-extras/snapshots/latest.json
+```
+
+Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. Only a whole-workspace export (no space/list filters, closed tasks and subtasks included) updates `latest.json` and is compared with the previous one; a filtered export writes a `filtered-*.json` file, and each kind keeps its own last 5. ClickUp pages by offset, so a task created, deleted or moved while an export runs can be missed and appear among the missing IDs: rerun the export to confirm. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
+
+### Rate limiting
+Every request goes through one wrapper that reads `X-RateLimit-Remaining` / `X-RateLimit-Reset`: it pauses when fewer than 10 requests are left and, on a 429, waits for the reset and retries up to 3 times.
+
+### Read-only sessions
+`docs/audit-settings.json` denies every write tool of the official ClickUp MCP as exposed by the claude.ai connector (tool names `mcp__claude_ai_ClickUp__*`; and this server's write tools as `mcp__clickup-extras__*`; if you registered either server under another name, change those prefixes) (including `clickup_execute_operator`, whose bulk reads `export_tasks` replaces) and of this server, reading the `.env`, and shell calls to `api.clickup.com`. Start a session that must not change ClickUp with:
+
+```sh
+claude --settings ~/.local/share/clickup-mcp-extras/docs/audit-settings.json
+```
+
+It guards against mistakes, not against a determined agent: the token stays readable by your user.
+
 ## Setup
+
+Requires Node.js ≥ 22.
 
 1. Generate a Personal API Token at app.clickup.com → Settings → Apps.
 2. Copy `.env.example` to `.env` and paste the token (`CLICKUP_API_TOKEN=pk_xxx`).

@@ -13,12 +13,12 @@ echo ""
 
 # Node check
 if ! command -v node >/dev/null 2>&1; then
-  echo "ERROR: node not found in PATH. Install Node.js >= 18 first." >&2
+  echo "ERROR: node not found in PATH. Install Node.js >= 22 first." >&2
   exit 1
 fi
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-if [ "$NODE_MAJOR" -lt 18 ]; then
-  echo "ERROR: Node.js >= 18 required (found $(node --version))." >&2
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  echo "ERROR: Node.js >= 22 required (found $(node --version))." >&2
   exit 1
 fi
 

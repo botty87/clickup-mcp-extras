@@ -1,11 +1,11 @@
 {
   "name": "clickup-mcp-extras",
-  "version": "0.3.0",
-  "description": "Local MCP server exposing ClickUp comment tools with structured @-mentions support.",
+  "version": "0.4.0",
+  "description": "Local MCP server exposing ClickUp tools: comments with structured @-mentions and images, subtask reparenting, bulk task export.",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc",

@@ -27,6 +27,10 @@ import {
   setTaskParentInputShape,
   handleSetTaskParent,
 } from "./tools/reparent.js";
+import {
+  exportTasksInputShape,
+  handleExportTasks,
+} from "./tools/export-tasks.js";
 
 if (!process.env.CLICKUP_API_TOKEN) {
   console.error(
@@ -38,7 +42,7 @@ if (!process.env.CLICKUP_API_TOKEN) {
 const server = new McpServer(
   {
     name: "clickup-mcp-extras",
-    version: "0.3.0",
+    version: "0.4.0",
   },
   {
     capabilities: { tools: {} },
@@ -78,6 +82,13 @@ server.tool(
   "Set the parent of a task by passing the parent's ID. If the task was standalone, it becomes a subtask. If it already had a parent, the parent is replaced (equivalent to reparent_subtask).",
   setTaskParentInputShape,
   handleSetTaskParent,
+);
+
+server.tool(
+  "export_tasks",
+  "Read-only bulk export of the tasks in a ClickUp workspace (closed and subtasks included by default; archived tasks are not returned by this endpoint) through the REST API: about one request per 100 tasks, and none against the official ClickUp MCP's daily call cap. Writes the full raw tasks to a local JSON snapshot and returns only its path plus counts by status, assignee and list, and the task IDs missing since the previous snapshot. Use it instead of repeated get_task calls or paging filter_tasks, then query the file from the shell, e.g. jq '[.tasks[] | select(.status.status == \"in progress\") | {id, name}]' <latest>. Only a whole-workspace export (no space/list filters, closed tasks and subtasks included) updates latest.json and is compared with the previous one; full and filtered exports each keep their last 5 files. Paging is by offset: a task changed or deleted during the export can be missed and show up in the missing list.",
+  exportTasksInputShape,
+  handleExportTasks,
 );
 
 const transport = new StdioServerTransport();
