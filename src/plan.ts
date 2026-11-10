@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { appendFile, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { ClickUpError, request } from "./clickup-client.js";
 import { stateDir } from "./state.js";
@@ -194,7 +194,7 @@ export async function write(op: Op): Promise<{ comment_id?: string }> {
 }
 
 // Connection errors raised before the request could reach ClickUp.
-const NOT_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"]);
+const NOT_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
 
 /** A failure after which the write may or may not have happened. */
 export function isAmbiguous(err: unknown): boolean {
@@ -224,7 +224,7 @@ export function plansDir(): string {
 export async function preview(
   plan: Plan,
   io: Io,
-  opts: { allowLarge?: boolean } = {},
+  opts: { allowLarge?: boolean; signal?: { name?: string } } = {},
 ): Promise<Preview> {
   if (plan.ops.length > LARGE_PLAN && !opts.allowLarge) {
     throw new Error(`Plan has ${plan.ops.length} operations (more than ${LARGE_PLAN}): pass --allow-large.`);
@@ -232,6 +232,7 @@ export async function preview(
   const hash = planHash(plan);
   const tasks = new Map<string, LiveTask>();
   for (const id of new Set(plan.ops.map((o) => o.task_id))) {
+    if (opts.signal?.name) throw new Interrupted(opts.signal.name);
     const task = await getTask(id);
     if (task.team_id && task.team_id !== plan.team_id) {
       throw new Error(`Task ${id} belongs to workspace ${task.team_id}, not ${plan.team_id}.`);
@@ -247,12 +248,14 @@ export async function preview(
     const task = simulated.get(op.task_id)!;
     const d = drift(op, task);
     if (d.length) drifted++;
-    // A drifted op is not applied (apply stops, or skips it with --skip-drift),
-    // so later ops on the task are checked against the state without it.
-    else simulated.set(op.task_id, simulate(op, task));
-    for (const p of [...(task.assignees ?? []), ...(task.watchers ?? [])]) {
-      const who = p.username ?? p.email;
-      if (who) notified.add(who);
+    else {
+      // A drifted op is not applied (apply stops, or skips it with --skip-drift):
+      // later ops on the task are checked without it, and it notifies no one.
+      simulated.set(op.task_id, simulate(op, task));
+      for (const p of [...(task.assignees ?? []), ...(task.watchers ?? [])]) {
+        const who = p.username ?? p.email;
+        if (who) notified.add(who);
+      }
     }
     io.out(
       `#${i + 1} ${op.op} ${op.task_id} "${task.name ?? ""}": ` +
@@ -284,6 +287,12 @@ type LogEntry = {
 };
 
 export type ApplyResult = { dir: string; applied: number; skipped: number; stopped?: string };
+
+class Interrupted extends Error {
+  constructor(public signalName: string) {
+    super(`interrupted (${signalName})`);
+  }
+}
 
 /**
  * Applies a plan once, one operation at a time. Refuses without a terminal,
@@ -342,22 +351,37 @@ async function applyLocked(
   short: string,
   signal: { name?: string },
 ): Promise<ApplyResult> {
-  const logPath = join(dir, "apply-log.jsonl");
-  const ran = await readFile(logPath, "utf8").then((t) => t.length > 0, () => false);
-  if (ran) {
-    throw new Error(
-      `This plan already ran (log: ${logPath}). A plan is applied once: to go on, ` +
-        `write a new plan from the current state of the tasks (expected_before guards it).`,
-    );
-  }
+  // Earlier runs of the same plan: no automatic resume, so a rerun applies
+  // every op again. Say so before the person confirms.
+  const earlier = (await readdir(dir)).filter((f) => /^run-/.test(f)).sort();
+  const notConfirmed = (stopped: string): ApplyResult => ({ dir, applied: 0, skipped: 0, stopped });
 
-  io.out("Live preview:");
-  await preview(plan, io, opts);
-  if (signal.name) return { dir, applied: 0, skipped: 0, stopped: `interrupted (${signal.name}) before writing` };
-  const answer = (await io.ask(`Type the first 8 characters of the hash to apply: `)).trim();
-  if (signal.name) return { dir, applied: 0, skipped: 0, stopped: `interrupted (${signal.name}) before writing` };
-  if (answer !== short) return { dir, applied: 0, skipped: 0, stopped: "not confirmed" };
-  await writeFile(join(dir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
+  let answer: string;
+  try {
+    io.out("Live preview:");
+    await preview(plan, io, { ...opts, signal });
+    if (earlier.length) {
+      io.out(
+        `WARNING: this plan already ran ${earlier.length} time(s) (${earlier.map((f) => join(dir, f)).join(", ")}). ` +
+          `Running it again repeats every operation; those without expected_before, like comments, are not guarded.`,
+      );
+    }
+    if (signal.name) throw new Interrupted(signal.name);
+    answer = (await io.ask(`Type the first 8 characters of the hash to apply: `)).trim();
+    if (signal.name) throw new Interrupted(signal.name);
+  } catch (err) {
+    // Ctrl+C at the prompt reaches readline, which aborts the question.
+    if (err instanceof Interrupted) return notConfirmed(`interrupted (${err.signalName}) before writing`);
+    if (err instanceof Error && err.name === "AbortError") return notConfirmed("interrupted (SIGINT) before writing");
+    throw err;
+  }
+  if (answer !== short) return notConfirmed("not confirmed");
+
+  // Each confirmed run gets its own folder.
+  const runDir = join(dir, `run-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  await mkdir(runDir, { mode: 0o700 });
+  await writeFile(join(runDir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
+  const logPath = join(runDir, "apply-log.jsonl");
 
   const entries: LogEntry[] = [];
   const log = async (e: Omit<LogEntry, "ts">) => {
@@ -402,8 +426,15 @@ async function applyLocked(
       }
       try {
         const res = await write(op);
-        await log({ ...base, result: "ok", before, ...res });
         applied++;
+        try {
+          await log({ ...base, result: "ok", before, ...res });
+        } catch (logErr) {
+          // The write landed: it is in `entries`, so the rollback still covers it.
+          const msg = logErr instanceof Error ? logErr.message : String(logErr);
+          stopped = `#${index + 1} was written, but the log could not be updated (${msg})`;
+          break;
+        }
         io.out(`#${index + 1} ok`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -419,7 +450,7 @@ async function applyLocked(
     // Also on an unexpected error, so what was written can always be undone. A
     // failure here is reported without hiding the error that ended the run.
     try {
-      await writeRollback(plan, dir, short, entries);
+      await writeRollback(plan, runDir, short, entries);
     } catch (err) {
       io.out(`WARNING: rollback not written: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -427,7 +458,7 @@ async function applyLocked(
   if (stopped && applied + skipped < plan.ops.length) {
     stopped += `. Applied before stopping: ${applied}. To go on, write a new plan for the remaining operations.`;
   }
-  return { dir, applied, skipped, stopped };
+  return { dir: runDir, applied, skipped, stopped };
 }
 
 /**

@@ -131,7 +131,7 @@ test("apply writes every op, logs it and builds the rollback plan", async () => 
   );
   assert.equal(tasks.a.status.status, "done");
 
-  const dir = join(plansDir(), short);
+  const dir = r.dir;
   const log = (await readFile(join(dir, "apply-log.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
   assert.deepEqual(log.map((e) => e.result), ["ok", "ok", "ok"]);
   const rollback = parsePlan(JSON.parse(await readFile(join(dir, "rollback.json"), "utf8")));
@@ -270,11 +270,11 @@ test("Ctrl+C during the writes stops after the current op, releases the lock and
   }
   assert.equal(r.applied, 1);
   assert.match(r.stopped, /interrupted \(SIGINT\) before #2/);
-  await assert.rejects(readFile(join(r.dir, "apply.lock"), "utf8"), /ENOENT/);
+  await assert.rejects(readFile(join(plansDir(), planHash(plan).slice(0, 8), "apply.lock"), "utf8"), /ENOENT/);
   const rollback = parsePlan(JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8")));
   assert.deepEqual(rollback.ops.map((o) => `${o.op} ${o.task_id}`), ["remove_tag a"]);
 });
-test("apply stops at drift, and the same plan cannot run a second time", async () => {
+test("apply stops at drift; a rerun warns that it repeats every op and uses a new run folder", async () => {
   const plan = parsePlan({
     version: 1,
     team_id: TEAM,
@@ -286,9 +286,26 @@ test("apply stops at drift, and the same plan cannot run a second time", async (
   const short = planHash(plan).slice(0, 8);
   const first = await apply(plan, io(short), { approve: short });
   assert.equal(first.applied, 1);
-  assert.match(first.stopped, /drift at #2.*Applied before stopping: 1.*new plan/);
-  await assert.rejects(apply(plan, io(short), { approve: short }), /already ran.*new plan/);
+  assert.match(first.stopped, /drift at #2.*Applied before stopping: 1/);
+  const o = io("no");
+  const second = await apply(plan, o, { approve: short });
+  assert.equal(second.stopped, "not confirmed");
+  assert.match(o.lines.join("\n"), /WARNING: this plan already ran 1 time\(s\)/);
   assert.equal(writes.length, 1);
+});
+
+test("Ctrl+C at the prompt (aborted question) stops cleanly and releases the lock", async () => {
+  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "add_tag", task_id: "a", args: { tag: "n" } }] });
+  const short = planHash(plan).slice(0, 8);
+  const ask = async () => {
+    const e = new Error("The operation was aborted");
+    e.name = "AbortError";
+    throw e;
+  };
+  const r = await apply(plan, { ...io(), ask }, { approve: short });
+  assert.equal(r.stopped, "interrupted (SIGINT) before writing");
+  assert.equal(writes.length, 0);
+  await assert.rejects(readFile(join(plansDir(), short, "apply.lock"), "utf8"), /ENOENT/);
 });
 
 test("a failed read mid-run stops cleanly and still writes the rollback", async () => {
@@ -357,6 +374,6 @@ test("Ctrl+C before confirming stops without writing and releases the lock", asy
   const r = await apply(plan, { ...io(), ask }, { approve: short });
   assert.match(r.stopped, /interrupted \(SIGINT\) before writing/);
   assert.equal(writes.length, 0);
-  await assert.rejects(readFile(join(r.dir, "apply.lock"), "utf8"), /ENOENT/);
+  await assert.rejects(readFile(join(plansDir(), planHash(plan).slice(0, 8), "apply.lock"), "utf8"), /ENOENT/);
 });
 
