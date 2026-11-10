@@ -32,13 +32,13 @@ The official MCP counts every call, reads included, against a daily cap shared b
 jq '[.tasks[] | select(.status.status == "in progress") | {id, name}]' ~/.local/state/clickup-mcp-extras/snapshots/latest.json
 ```
 
-Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. Only a whole-workspace export (no filters) updates `latest.json` and is compared with the previous one; a filtered export writes a `filtered-*.json` file, and each kind keeps its own last 5. ClickUp pages by offset, so a task created, deleted or moved while an export runs can be missed and appear among the missing IDs: rerun the export to confirm. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
+Snapshots live in `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/snapshots/`, outside the install folder so updates don't delete them. Each export keeps the last 5 and removes older ones. Only a whole-workspace export (no space/list filters, closed tasks and subtasks included) updates `latest.json` and is compared with the previous one; a filtered export writes a `filtered-*.json` file, and each kind keeps its own last 5. ClickUp pages by offset, so a task created, deleted or moved while an export runs can be missed and appear among the missing IDs: rerun the export to confirm. `team_id` defaults to `CLICKUP_TEAM_ID` in `.env`.
 
 ### Rate limiting
 Every request goes through one wrapper that reads `X-RateLimit-Remaining` / `X-RateLimit-Reset`: it pauses when fewer than 10 requests are left and, on a 429, waits for the reset and retries up to 3 times.
 
 ### Read-only sessions
-`docs/audit-settings.json` denies every write tool of the official ClickUp MCP as exposed by the claude.ai connector (tool names `mcp__claude_ai_ClickUp__*`; if you added the server under another name, change that prefix) (including `clickup_execute_operator`, whose bulk reads `export_tasks` replaces) and of this server, reading the `.env`, and shell calls to `api.clickup.com`. Start a session that must not change ClickUp with:
+`docs/audit-settings.json` denies every write tool of the official ClickUp MCP as exposed by the claude.ai connector (tool names `mcp__claude_ai_ClickUp__*`; and this server's write tools as `mcp__clickup-extras__*`; if you registered either server under another name, change those prefixes) (including `clickup_execute_operator`, whose bulk reads `export_tasks` replaces) and of this server, reading the `.env`, and shell calls to `api.clickup.com`. Start a session that must not change ClickUp with:
 
 ```sh
 claude --settings ~/.local/share/clickup-mcp-extras/docs/audit-settings.json
