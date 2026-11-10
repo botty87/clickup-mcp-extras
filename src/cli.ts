@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { config as dotenvConfig } from "dotenv";
 import { apply, preview, readPlan, type Io } from "./plan.js";
@@ -15,14 +16,27 @@ check is read-only. apply writes to ClickUp and must be run by a person in a ter
 Plan format: docs/plan-format.md`;
 
 async function main(argv: string[]): Promise<number> {
-  const [command, file, ...rest] = argv;
-  if (!command || !file || !["check", "apply"].includes(command)) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        approve: { type: "string" },
+        "skip-drift": { type: "boolean" },
+        "allow-large": { type: "boolean" },
+      },
+    });
+  } catch (err) {
+    console.error(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`);
+    return 64;
+  }
+  const [command, file, ...extra] = parsed.positionals;
+  if (!command || !file || extra.length || !["check", "apply"].includes(command)) {
     console.error(USAGE);
     return 64;
   }
-  const flag = (name: string) => rest.includes(name);
-  const approveAt = rest.indexOf("--approve");
-  const approve = approveAt >= 0 ? rest[approveAt + 1] : undefined;
+  const { approve, "skip-drift": skipDrift, "allow-large": allowLarge } = parsed.values;
 
   const io: Io = {
     out: (line) => console.log(line),
@@ -39,13 +53,13 @@ async function main(argv: string[]): Promise<number> {
 
   const plan = await readPlan(file);
   if (command === "check") {
-    const p = await preview(plan, io, { allowLarge: flag("--allow-large") });
+    const p = await preview(plan, io, { allowLarge });
     return p.drifted > 0 ? 2 : 0;
   }
 
-  const r = await apply(plan, io, { approve, skipDrift: flag("--skip-drift"), allowLarge: flag("--allow-large") });
+  const r = await apply(plan, io, { approve, skipDrift, allowLarge });
   io.out(`applied: ${r.applied}, skipped for drift: ${r.skipped}`);
-  io.out(`log and rollback plan: ${r.dir}`);
+  io.out(`log and rollback: ${r.dir}`);
   if (r.stopped) {
     io.out(`stopped: ${r.stopped}`);
     return 1;
@@ -53,10 +67,13 @@ async function main(argv: string[]): Promise<number> {
   return 0;
 }
 
+// exitCode, not process.exit(): output still queued for a pipe gets written.
 main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
+  (code) => {
+    process.exitCode = code;
+  },
   (err) => {
     console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

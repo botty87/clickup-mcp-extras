@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { appendFile, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { ClickUpError, request } from "./clickup-client.js";
 
@@ -118,6 +118,20 @@ export function stateAfter(op: Op): Record<string, unknown> {
   }
 }
 
+/** The task as it will be after `op`, so later ops on the same task are checked against it. */
+export function simulate(op: Op, task: LiveTask): LiveTask {
+  switch (op.op) {
+    case "set_status":
+      return { ...task, status: { ...task.status, status: op.args.status } };
+    case "add_tag":
+      return hasTag(task, op.args.tag) ? task : { ...task, tags: [...(task.tags ?? []), { name: op.args.tag }] };
+    case "remove_tag":
+      return { ...task, tags: (task.tags ?? []).filter((t) => t.name?.toLowerCase() !== op.args.tag.toLowerCase()) };
+    case "comment":
+      return task;
+  }
+}
+
 /** Fields of expected_before that differ from the live state (status compared case-insensitively). */
 export function drift(op: Op, task: LiveTask): string[] {
   if (op.op === "comment" || !op.expected_before) return [];
@@ -218,8 +232,11 @@ export async function preview(plan: Plan, io: Io, opts: { allowLarge?: boolean }
 
   const notified = new Set<string>();
   let drifted = 0;
+  // Walk the ops on a simulated copy, so chained ops on one task are not reported as drift.
+  const simulated = new Map(tasks);
   plan.ops.forEach((op, i) => {
-    const task = tasks.get(op.task_id)!;
+    const task = simulated.get(op.task_id)!;
+    simulated.set(op.task_id, simulate(op, task));
     const d = drift(op, task);
     if (d.length) drifted++;
     for (const p of [...(task.assignees ?? []), ...(task.watchers ?? [])]) {
@@ -233,7 +250,8 @@ export async function preview(plan: Plan, io: Io, opts: { allowLarge?: boolean }
     );
   });
 
-  const calls = tasks.size + plan.ops.length * 2; // check reads + per-op read and write
+  // Preview reads, then a read before each non-comment op, then the writes.
+  const calls = tasks.size + plan.ops.filter((o) => o.op !== "comment").length + plan.ops.length;
   io.out(`operations: ${plan.ops.length}, tasks: ${tasks.size}, drifted: ${drifted}`);
   io.out(`notified (assignees and watchers): ${[...notified].sort().join(", ") || "none"}`);
   io.out(`REST calls for apply: about ${calls}, at most 100 per minute`);
@@ -247,21 +265,34 @@ type LogEntry = {
   index: number;
   op: Op["op"];
   task_id: string;
-  result: "ok" | "skipped_drift" | "error";
+  // unknown: the write may or may not have happened (timeout, 5xx).
+  result: "ok" | "unknown" | "skipped_drift" | "stopped_drift" | "error";
   before?: Record<string, unknown>;
   comment_id?: string;
   error?: string;
 };
 
+/** Log entries; a line cut short by a crash is skipped, any other bad line stops the run. */
 async function readLog(path: string): Promise<LogEntry[]> {
+  let text: string;
   try {
-    return (await readFile(path, "utf8"))
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l) as LogEntry);
-  } catch {
-    return [];
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
   }
+  const lines = text.split("\n").filter(Boolean);
+  const entries: LogEntry[] = [];
+  lines.forEach((line, i) => {
+    try {
+      entries.push(JSON.parse(line) as LogEntry);
+    } catch {
+      if (i !== lines.length - 1 || text.endsWith("\n")) {
+        throw new Error(`${path} line ${i + 1} is not valid JSON: fix or move the log before applying again.`);
+      }
+    }
+  });
+  return entries;
 }
 
 export type ApplyResult = { dir: string; applied: number; skipped: number; stopped?: string };
@@ -288,7 +319,15 @@ export async function apply(
   await chmod(dir, 0o700);
   await writeFile(join(dir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
   const logPath = join(dir, "apply-log.jsonl");
-  const done = new Set((await readLog(logPath)).filter((e) => e.result === "ok").map((e) => e.index));
+  const previous = await readLog(logPath);
+  const raw = await readFile(logPath, "utf8").catch(() => "");
+  if (raw && !raw.endsWith("\n")) {
+    // The last line was cut short by a crash: drop it before appending, or the
+    // next entry would be glued to it.
+    const kept = previous.map((e) => `${JSON.stringify(e)}\n`).join("");
+    await writeFile(logPath, kept, { mode: 0o600 });
+  }
+  const done = new Set(previous.filter((e) => e.result === "ok").map((e) => e.index));
 
   io.out("Live preview:");
   await preview(plan, io, opts);
@@ -302,45 +341,54 @@ export async function apply(
   let applied = 0;
   let skipped = 0;
   let stopped: string | undefined;
-  for (const [index, op] of plan.ops.entries()) {
-    if (done.has(index)) continue;
-    const base = { index, op: op.op, task_id: op.task_id };
-    const task = await getTask(op.task_id);
-    const before = stateFor(op, task);
-    const d = drift(op, task);
-    if (d.length) {
-      await log({ ...base, result: "skipped_drift", before, error: d.join("; ") });
-      if (!opts.skipDrift) {
-        stopped = `drift at #${index + 1} (${d.join("; ")}): nothing written for it; rerun with --skip-drift to skip it`;
+  try {
+    for (const [index, op] of plan.ops.entries()) {
+      if (done.has(index)) continue;
+      const base = { index, op: op.op, task_id: op.task_id };
+      // A comment has no state to compare, so it needs no read before writing.
+      const task = op.op === "comment" ? undefined : await getTask(op.task_id);
+      const before = task ? stateFor(op, task) : {};
+      const d = task ? drift(op, task) : [];
+      if (d.length) {
+        if (!opts.skipDrift) {
+          await log({ ...base, result: "stopped_drift", before, error: d.join("; ") });
+          stopped = `drift at #${index + 1} (${d.join("; ")}): nothing written for it; rerun with --skip-drift to skip it`;
+          break;
+        }
+        await log({ ...base, result: "skipped_drift", before, error: d.join("; ") });
+        skipped++;
+        continue;
+      }
+      try {
+        const res = await write(op);
+        await log({ ...base, result: "ok", before, ...res });
+        applied++;
+        io.out(`#${index + 1} ok`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const unknown = isAmbiguous(err);
+        await log({ ...base, result: unknown ? "unknown" : "error", before, error: msg });
+        stopped = unknown
+          ? `#${index + 1} ${op.op}: the outcome is unknown (${msg}). Check the task before rerunning` +
+            (op.op === "comment" ? ", or the comment may be posted twice." : "; rollback.json includes its undo.")
+          : `#${index + 1} failed: ${msg}`;
         break;
       }
-      skipped++;
-      continue;
     }
-    try {
-      const res = await write(op);
-      await log({ ...base, result: "ok", before, ...res });
-      applied++;
-      io.out(`#${index + 1} ok`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await log({ ...base, result: "error", before, error: msg });
-      stopped =
-        op.op === "comment" && isAmbiguous(err)
-          ? `#${index + 1} comment: the outcome is unknown (${msg}). Check the task before rerunning, or the comment may be posted twice.`
-          : `#${index + 1} failed: ${msg}`;
-      break;
-    }
+  } finally {
+    // Also on an unexpected error (a failed read, a lost connection), so the
+    // operations already applied can always be undone.
+    await writeRollback(plan, dir, short, await readLog(logPath));
   }
-
-  await writeRollback(plan, dir, short, await readLog(logPath));
   return { dir, applied, skipped, stopped };
 }
 
 /** A plan that undoes every "ok" operation, newest first; it goes through check/apply like any plan. */
 async function writeRollback(plan: Plan, dir: string, short: string, entries: LogEntry[]): Promise<void> {
+  // "unknown" writes may have happened: undoing them is harmless if they did not,
+  // because the undo carries its own expected_before.
   const ops = entries
-    .filter((e) => e.result === "ok")
+    .filter((e) => e.result === "ok" || e.result === "unknown")
     .sort((a, b) => b.index - a.index)
     .map((e) => (e.before ? inverse(plan.ops[e.index], e.before) : null))
     .filter((o): o is Op => o !== null);
@@ -348,6 +396,14 @@ async function writeRollback(plan: Plan, dir: string, short: string, entries: Lo
   const note =
     `Rollback of plan ${short}.` +
     (comments.length ? ` Comments cannot be undone (task:comment_id): ${comments.join(", ")}.` : "");
+  const path = join(dir, "rollback.json");
+  if (ops.length === 0) {
+    // A plan needs at least one op: with nothing to undo, leave a note instead.
+    await rm(path, { force: true });
+    await writeFile(join(dir, "rollback-note.txt"), `${note}\nNothing to undo.\n`, { mode: 0o600 });
+    return;
+  }
   const rollback = { version: 1, team_id: plan.team_id, created_at: new Date().toISOString(), note, ops };
-  await writeFile(join(dir, "rollback.json"), JSON.stringify(rollback, null, 2), { mode: 0o600 });
+  await writeFile(path, JSON.stringify(rollback, null, 2), { mode: 0o600 });
+  await rm(join(dir, "rollback-note.txt"), { force: true });
 }

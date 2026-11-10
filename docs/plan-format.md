@@ -36,12 +36,12 @@ There is no delete, create, move or custom-field operation. Unknown fields are r
 ## What apply does
 
 - Runs one operation at a time: it reads the task, compares it with `expected_before`, writes, and logs the result.
-- Stops at the first drift (the task changed since the plan was written). `--skip-drift` skips drifted operations and goes on.
-- Stops on any error. If a comment fails with a timeout or a 5xx, its outcome is unknown: check the task before rerunning, or the comment may be posted twice.
-- Running `apply` again on the same plan resumes: operations already applied are skipped.
+- Stops at the first drift (the task changed since the plan was written), logged as `stopped_drift`. `--skip-drift` skips drifted operations (`skipped_drift`) and goes on. `check` follows several operations on the same task in order, so a chain such as `in review` → `testing` → `done` is not reported as drift.
+- Stops on any error. After a timeout or a 5xx the outcome is unknown (logged as `unknown`): check the task before rerunning. For a comment this matters most, since a rerun may post it twice; a status or tag change of unknown outcome is still included in the rollback.
+- Running `apply` again on the same plan resumes: operations already applied are skipped. A log line cut short by a crash is dropped.
 - Writes to `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/plans/<hash8>/`:
   - `plan.json`, the plan that was approved;
   - `apply-log.jsonl`, one line per operation with the state before it;
-  - `rollback.json`, a plan that undoes the applied operations in reverse order. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID.
+  - `rollback.json`, a plan that undoes the applied operations in reverse order, written even when a run stops on an error. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo (only comments, or nothing applied) there is a `rollback-note.txt` instead.
 
 Changes are made as the owner of the token: assignees and watchers get ClickUp's usual notifications. Status changes can also trigger the workspace's Automations, which a rollback does not undo.

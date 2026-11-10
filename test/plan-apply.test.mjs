@@ -2,7 +2,7 @@
 // this process. Run with `npm test` after `npm run build`.
 import { test, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -207,7 +207,83 @@ test("a posted comment is not in the rollback but its id is in the note", async 
   const r = await apply(plan, io(short), { approve: short });
   assert.equal(r.applied, 1);
   assert.deepEqual(writes[0].body, { comment_text: "hello", notify_all: false });
-  const rollback = JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8"));
-  assert.deepEqual(rollback.ops, []);
-  assert.match(rollback.note, /a:4242/);
+  await assert.rejects(readFile(join(r.dir, "rollback.json"), "utf8"), /ENOENT/);
+  assert.match(await readFile(join(r.dir, "rollback-note.txt"), "utf8"), /a:4242/);
+});
+
+test("check follows chained ops on the same task instead of reporting drift", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "set_status", task_id: "a", args: { status: "testing" }, expected_before: { status: "in review" } },
+      { op: "set_status", task_id: "a", args: { status: "done" }, expected_before: { status: "testing" } },
+      { op: "add_tag", task_id: "a", args: { tag: "t" } },
+      { op: "remove_tag", task_id: "a", args: { tag: "t" }, expected_before: { has_tag: true } },
+    ],
+  });
+  const p = await preview(plan, io());
+  assert.equal(p.drifted, 0);
+});
+
+test("a stop at drift is logged as stopped_drift, not skipped", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [{ op: "set_status", task_id: "a", args: { status: "done" }, expected_before: { status: "to do" } }],
+  });
+  const short = planHash(plan).slice(0, 8);
+  const r = await apply(plan, io(short), { approve: short });
+  const log = (await readFile(join(r.dir, "apply-log.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(log.map((e) => e.result), ["stopped_drift"]);
+});
+
+test("a log line cut short by a crash is skipped and done ops are not repeated", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "comment", task_id: "a", args: { text: "once" } },
+      { op: "add_tag", task_id: "b", args: { tag: "x" } },
+    ],
+  });
+  const short = planHash(plan).slice(0, 8);
+  const dir = join(plansDir(), short);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "apply-log.jsonl"),
+    JSON.stringify({ ts: "t", index: 0, op: "comment", task_id: "a", result: "ok", before: {} }) + '\n{"ts":"t","index":1,"op":"add',
+  );
+  const r = await apply(plan, io(short), { approve: short });
+  assert.equal(r.applied, 1);
+  assert.deepEqual(writes.map((w) => w.path), ["/task/b/tag/x"]);
+});
+
+test("rollback.json is written even when a read fails mid-run", async () => {
+  const plan = parsePlan({
+    version: 1,
+    team_id: TEAM,
+    ops: [
+      { op: "add_tag", task_id: "a", args: { tag: "first" } },
+      { op: "add_tag", task_id: "b", args: { tag: "second" } },
+    ],
+  });
+  const short = planHash(plan).slice(0, 8);
+  const ask = async () => {
+    delete tasks.b; // b disappears after the preview: its read before the write will 404
+    return short;
+  };
+  await assert.rejects(apply(plan, { ...io(), ask }, { approve: short }), /Task not found/);
+  const rollback = parsePlan(JSON.parse(await readFile(join(plansDir(), short, "rollback.json"), "utf8")));
+  assert.deepEqual(rollback.ops, [{ op: "remove_tag", task_id: "a", args: { tag: "first" }, expected_before: { has_tag: true } }]);
+});
+
+test("a status write with an unknown outcome is in the rollback", async () => {
+  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "set_status", task_id: "a", args: { status: "done" } }] });
+  const short = planHash(plan).slice(0, 8);
+  failNext = { method: "PUT", status: 504 };
+  const r = await apply(plan, io(short), { approve: short });
+  assert.match(r.stopped, /outcome is unknown.*rollback\.json includes its undo/);
+  const rollback = parsePlan(JSON.parse(await readFile(join(r.dir, "rollback.json"), "utf8")));
+  assert.deepEqual(rollback.ops, [{ op: "set_status", task_id: "a", args: { status: "in review" }, expected_before: { status: "done" } }]);
 });
