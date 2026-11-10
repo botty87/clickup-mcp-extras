@@ -43,8 +43,12 @@ async function main(argv: string[]): Promise<number> {
     isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     ask: async (question) => {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
+      // Ctrl+C at the prompt reaches readline, not the process: abort the
+      // question so apply unwinds and releases its lock.
+      const abort = new AbortController();
+      rl.on("SIGINT", () => abort.abort());
       try {
-        return await rl.question(question);
+        return await rl.question(question, { signal: abort.signal });
       } finally {
         rl.close();
       }

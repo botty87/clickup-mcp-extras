@@ -85,8 +85,11 @@ export type LiveTask = {
   watchers?: Person[];
 };
 
+// apply's requests fail after this instead of hanging on a stalled connection.
+const TIMEOUT = { timeoutMs: 60_000 };
+
 export async function getTask(taskId: string): Promise<LiveTask> {
-  return request<LiveTask>("GET", `/task/${encodeURIComponent(taskId)}`);
+  return request<LiveTask>("GET", `/task/${encodeURIComponent(taskId)}`, undefined, TIMEOUT);
 }
 
 // ClickUp tag names are case-insensitive and come back lowercased, so tags are
@@ -172,27 +175,34 @@ export async function write(op: Op): Promise<{ comment_id?: string }> {
   const task = `/task/${encodeURIComponent(op.task_id)}`;
   switch (op.op) {
     case "set_status":
-      await request("PUT", task, { status: op.args.status });
+      await request("PUT", task, { status: op.args.status }, TIMEOUT);
       return {};
     case "add_tag":
-      await request("POST", `${task}/tag/${encodeURIComponent(tagKey(op.args.tag))}`);
+      await request("POST", `${task}/tag/${encodeURIComponent(tagKey(op.args.tag))}`, undefined, TIMEOUT);
       return {};
     case "remove_tag":
-      await request("DELETE", `${task}/tag/${encodeURIComponent(tagKey(op.args.tag))}`);
+      await request("DELETE", `${task}/tag/${encodeURIComponent(tagKey(op.args.tag))}`, undefined, TIMEOUT);
       return {};
     case "comment": {
       const res = await request<{ id?: string | number }>("POST", `${task}/comment`, {
         comment_text: op.args.text,
         notify_all: false,
-      });
+      }, TIMEOUT);
       return { comment_id: res?.id === undefined ? undefined : String(res.id) };
     }
   }
 }
 
+// Connection errors raised before the request could reach ClickUp.
+const NOT_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"]);
+
 /** A failure after which the write may or may not have happened. */
 export function isAmbiguous(err: unknown): boolean {
-  return !(err instanceof ClickUpError) || err.status >= 500;
+  if (err instanceof ClickUpError) return err.status >= 500;
+  const code = (err as { cause?: { code?: string } })?.cause?.code;
+  if (code && NOT_SENT.has(code)) return false;
+  if (err instanceof Error && err.message.startsWith("CLICKUP_API_TOKEN")) return false;
+  return true; // timeouts, resets mid-request, anything unrecognised
 }
 
 // --- Check and apply ---------------------------------------------------------
@@ -214,7 +224,7 @@ export function plansDir(): string {
 export async function preview(
   plan: Plan,
   io: Io,
-  opts: { allowLarge?: boolean; done?: Set<number> } = {},
+  opts: { allowLarge?: boolean } = {},
 ): Promise<Preview> {
   if (plan.ops.length > LARGE_PLAN && !opts.allowLarge) {
     throw new Error(`Plan has ${plan.ops.length} operations (more than ${LARGE_PLAN}): pass --allow-large.`);
@@ -235,11 +245,6 @@ export async function preview(
   const simulated = new Map(tasks);
   plan.ops.forEach((op, i) => {
     const task = simulated.get(op.task_id)!;
-    if (opts.done?.has(i)) {
-      // Applied in an earlier run: the live task already reflects it.
-      io.out(`#${i + 1} ${op.op} ${op.task_id} "${task.name ?? ""}": already applied`);
-      return;
-    }
     const d = drift(op, task);
     if (d.length) drifted++;
     // A drifted op is not applied (apply stops, or skips it with --skip-drift),
@@ -257,8 +262,7 @@ export async function preview(
   });
 
   // Preview reads, then a read before each non-comment op, then the writes.
-  const pending = plan.ops.filter((_, i) => !opts.done?.has(i));
-  const calls = tasks.size + pending.filter((o) => o.op !== "comment").length + pending.length;
+  const calls = tasks.size + plan.ops.filter((o) => o.op !== "comment").length + plan.ops.length;
   io.out(`operations: ${plan.ops.length}, tasks: ${tasks.size}, drifted: ${drifted}`);
   io.out(`notified (assignees and watchers): ${[...notified].sort().join(", ") || "none"}`);
   io.out(`REST calls for apply: about ${calls}, at most 100 per minute`);
@@ -279,46 +283,13 @@ type LogEntry = {
   error?: string;
 };
 
-/**
- * Log entries; a last line cut short by a crash is skipped (truncated = true),
- * any other bad line stops the run.
- */
-async function readLog(path: string): Promise<{ entries: LogEntry[]; truncated: boolean; partial?: string }> {
-  let text: string;
-  try {
-    text = await readFile(path, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: [], truncated: false };
-    throw err;
-  }
-  const truncated = text.length > 0 && !text.endsWith("\n");
-  const lines = text.split("\n").filter(Boolean);
-  const entries: LogEntry[] = [];
-  let partial: string | undefined;
-  lines.forEach((line, i) => {
-    let entry: Partial<LogEntry> | undefined;
-    try {
-      entry = JSON.parse(line) as Partial<LogEntry>;
-    } catch {
-      if (i === lines.length - 1 && truncated) {
-        partial = line;
-        return;
-      }
-    }
-    if (!entry || typeof entry.index !== "number" || typeof entry.result !== "string") {
-      throw new Error(`${path} line ${i + 1} is not a valid log entry: fix or move the log before applying again.`);
-    }
-    entries.push(entry as LogEntry);
-  });
-  return { entries, truncated, partial };
-}
-
 export type ApplyResult = { dir: string; applied: number; skipped: number; stopped?: string };
 
 /**
- * Applies a plan, one operation at a time. Refuses without a terminal and
- * without the person typing the hash; stops at the first drift or error.
- * Resumable: operations already "ok" in the log are skipped.
+ * Applies a plan once, one operation at a time. Refuses without a terminal,
+ * without the person typing the hash, and for a plan that already has a log:
+ * to continue after a stop, write a new plan from the current state. Stops at
+ * the first drift or error; Ctrl+C stops after the current operation.
  */
 export async function apply(
   plan: Plan,
@@ -336,7 +307,7 @@ export async function apply(
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
 
-  // One apply per plan at a time: two runs would both replay the pending ops.
+  // One apply at a time per plan: two terminals must not both run it.
   const lockPath = join(dir, "apply.lock");
   try {
     await writeFile(lockPath, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
@@ -344,9 +315,21 @@ export async function apply(
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     throw new Error(`Another apply of this plan is running, or one crashed: if none is running, delete ${lockPath}.`);
   }
+
+  // Ctrl+C or a kill from here on: finish what is in progress, then stop, so the
+  // lock is released and the rollback covers everything written.
+  const signal = { name: undefined as string | undefined };
+  const onSignal = (sig: NodeJS.Signals) => {
+    signal.name = sig;
+    io.out(`${sig}: stopping after the current step...`);
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   try {
-    return await applyLocked(plan, io, opts, dir, short);
+    return await applyLocked(plan, io, opts, dir, short, signal);
   } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
     await rm(lockPath, { force: true });
   }
 }
@@ -357,70 +340,60 @@ async function applyLocked(
   opts: { skipDrift?: boolean; allowLarge?: boolean },
   dir: string,
   short: string,
+  signal: { name?: string },
 ): Promise<ApplyResult> {
   const logPath = join(dir, "apply-log.jsonl");
-  const { entries: previous, truncated, partial } = await readLog(logPath);
-  if (truncated) {
-    // The last line was cut short by a crash. Lines are written right after a
-    // write returns, so that write may have landed: record it as "unknown"
-    // (shown below before confirming), then rewrite the log so new lines are
-    // not glued to the broken one.
-    const index = Number(partial?.match(/"index":(\d+)/)?.[1]);
-    const op = Number.isInteger(index) ? plan.ops[index] : undefined;
-    if (op) {
-      previous.push({ ts: new Date().toISOString(), index, op: op.op, task_id: op.task_id, result: "unknown", error: "log line cut short by a crash" });
-    }
-    await writeFile(logPath, previous.map((e) => `${JSON.stringify(e)}\n`).join(""), { mode: 0o600 });
+  const ran = await readFile(logPath, "utf8").then((t) => t.length > 0, () => false);
+  if (ran) {
+    throw new Error(
+      `This plan already ran (log: ${logPath}). A plan is applied once: to go on, ` +
+        `write a new plan from the current state of the tasks (expected_before guards it).`,
+    );
   }
-  const done = new Set(previous.filter((e) => e.result === "ok").map((e) => e.index));
 
   io.out("Live preview:");
-  await preview(plan, io, { ...opts, done });
-  if (done.size) io.out(`${done.size} operation(s) already applied in a previous run will be skipped.`);
-  const lastByIndex = new Map(previous.map((e) => [e.index, e] as const));
-  for (const e of lastByIndex.values()) {
-    if (e.result === "unknown") {
-      io.out(
-        `WARNING: #${e.index + 1} ${e.op} on ${e.task_id} has an unknown outcome from a previous run and will run again` +
-          (e.op === "comment" ? ": check the task first, or the comment may be posted twice." : "."),
-      );
-    }
-  }
+  await preview(plan, io, opts);
+  if (signal.name) return { dir, applied: 0, skipped: 0, stopped: `interrupted (${signal.name}) before writing` };
   const answer = (await io.ask(`Type the first 8 characters of the hash to apply: `)).trim();
+  if (signal.name) return { dir, applied: 0, skipped: 0, stopped: `interrupted (${signal.name}) before writing` };
   if (answer !== short) return { dir, applied: 0, skipped: 0, stopped: "not confirmed" };
   await writeFile(join(dir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
 
-  const log = async (e: Omit<LogEntry, "ts">) =>
-    appendFile(logPath, `${JSON.stringify({ ts: new Date().toISOString(), ...e })}\n`, { mode: 0o600 });
+  const entries: LogEntry[] = [];
+  const log = async (e: Omit<LogEntry, "ts">) => {
+    const entry = { ts: new Date().toISOString(), ...e };
+    entries.push(entry);
+    await appendFile(logPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  };
 
   let applied = 0;
   let skipped = 0;
   let stopped: string | undefined;
-  // Ctrl+C or a kill during the writes: finish the current op, then stop, so
-  // the lock is released and rollback.json covers everything written.
-  let interrupted: string | undefined;
-  const onSignal = (sig: NodeJS.Signals) => {
-    interrupted = sig;
-    io.out(`${sig}: stopping after the current operation...`);
-  };
-  process.on("SIGINT", onSignal);
-  process.on("SIGTERM", onSignal);
   try {
     for (const [index, op] of plan.ops.entries()) {
-      if (interrupted) {
-        stopped = `interrupted (${interrupted}) before #${index + 1}`;
+      if (signal.name) {
+        stopped = `interrupted (${signal.name}) before #${index + 1}`;
         break;
       }
-      if (done.has(index)) continue;
       const base = { index, op: op.op, task_id: op.task_id };
       // A comment has no state to compare, so it needs no read before writing.
-      const task = op.op === "comment" ? undefined : await getTask(op.task_id);
+      let task: LiveTask | undefined;
+      if (op.op !== "comment") {
+        try {
+          task = await getTask(op.task_id);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await log({ ...base, result: "error", error: `read failed: ${msg}` });
+          stopped = `#${index + 1}: reading the task failed (${msg}); nothing written for it`;
+          break;
+        }
+      }
       const before = task ? stateFor(op, task) : {};
       const d = task ? drift(op, task) : [];
       if (d.length) {
         if (!opts.skipDrift) {
           await log({ ...base, result: "stopped_drift", before, error: d.join("; ") });
-          stopped = `drift at #${index + 1} (${d.join("; ")}): nothing written for it; rerun with --skip-drift to skip it`;
+          stopped = `drift at #${index + 1} (${d.join("; ")}): nothing written for it`;
           break;
         }
         await log({ ...base, result: "skipped_drift", before, error: d.join("; ") });
@@ -437,59 +410,40 @@ async function applyLocked(
         const unknown = isAmbiguous(err);
         await log({ ...base, result: unknown ? "unknown" : "error", before, error: msg });
         stopped = unknown
-          ? `#${index + 1} ${op.op}: the outcome is unknown (${msg}). Check the task before rerunning` +
-            (op.op === "comment"
-              ? ", or the comment may be posted twice."
-              : "; the rollback note says how to undo it if it landed.")
+          ? `#${index + 1} ${op.op}: the outcome is unknown (${msg}). Check the task; the rollback note says how to undo it if it landed.`
           : `#${index + 1} failed: ${msg}`;
         break;
       }
     }
   } finally {
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
-    // Also on an unexpected error (a failed read, a lost connection), so the
-    // operations already applied can always be undone. A failure here is
-    // reported without hiding the error that ended the run.
+    // Also on an unexpected error, so what was written can always be undone. A
+    // failure here is reported without hiding the error that ended the run.
     try {
-      await writeRollback(plan, dir, short, (await readLog(logPath)).entries);
+      await writeRollback(plan, dir, short, entries);
     } catch (err) {
       io.out(`WARNING: rollback not written: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+  if (stopped && applied + skipped < plan.ops.length) {
+    stopped += `. Applied before stopping: ${applied}. To go on, write a new plan for the remaining operations.`;
   }
   return { dir, applied, skipped, stopped };
 }
 
 /**
- * A plan that undoes every applied operation, newest first; it goes through
- * check/apply like any plan. Operations of unknown outcome are not in it (their
+ * A plan that undoes this run's writes, newest first; it goes through
+ * check/apply like any plan. Writes of unknown outcome are not in it (their
  * undo would stop the rollback as drift if the write never landed): the note
  * says how to undo them by hand.
  */
 async function writeRollback(plan: Plan, dir: string, short: string, entries: LogEntry[]): Promise<void> {
-  // One outcome per operation across all runs. `before` is the state before the
-  // first attempt, so an op that landed as "unknown" and was rerun is still
-  // undone to where it started. `order` is when it last ran, so the undo follows
-  // the order the writes happened, not the plan order.
-  type Outcome = { index: number; op: Op["op"]; task_id: string; result: "ok" | "unknown"; before?: Record<string, unknown>; comment_id?: string; order: number };
-  const per = new Map<number, Outcome>();
-  entries.forEach((e, order) => {
-    if (e.result !== "ok" && e.result !== "unknown") return;
-    const cur = per.get(e.index);
-    if (!cur) {
-      per.set(e.index, { index: e.index, op: e.op, task_id: e.task_id, result: e.result, before: e.before, comment_id: e.comment_id, order });
-    } else if (e.result === "ok") {
-      Object.assign(cur, { result: "ok", comment_id: e.comment_id ?? cur.comment_id, order });
-    }
-  });
-  const final = [...per.values()].sort((a, b) => b.order - a.order);
-
-  const ops = final
+  const newestFirst = [...entries].reverse();
+  const ops = newestFirst
     .filter((e) => e.result === "ok" && e.before)
     .map((e) => inverse(plan.ops[e.index], e.before!))
     .filter((o): o is Op => o !== null);
-  const comments = final.filter((e) => e.result === "ok" && e.comment_id).map((e) => `${e.task_id}:${e.comment_id}`);
-  const uncertain = final
+  const comments = newestFirst.filter((e) => e.result === "ok" && e.comment_id).map((e) => `${e.task_id}:${e.comment_id}`);
+  const uncertain = newestFirst
     .filter((e) => e.result === "unknown")
     .map((e) => {
       const undo = e.before ? inverse(plan.ops[e.index], e.before) : null;
@@ -499,14 +453,11 @@ async function writeRollback(plan: Plan, dir: string, short: string, entries: Lo
     `Rollback of plan ${short}.` +
     (comments.length ? ` Comments cannot be undone (task:comment_id): ${comments.join(", ")}.` : "") +
     (uncertain.length ? ` Outcome unknown, check by hand: ${uncertain.join("; ")}.` : "");
-  const path = join(dir, "rollback.json");
   if (ops.length === 0) {
     // A plan needs at least one op: with nothing to undo, leave a note instead.
-    await rm(path, { force: true });
     await writeFile(join(dir, "rollback-note.txt"), `${note}\nNothing to undo.\n`, { mode: 0o600 });
     return;
   }
   const rollback = { version: 1, team_id: plan.team_id, created_at: new Date().toISOString(), note, ops };
-  await writeFile(path, JSON.stringify(rollback, null, 2), { mode: 0o600 });
-  await rm(join(dir, "rollback-note.txt"), { force: true });
+  await writeFile(join(dir, "rollback.json"), JSON.stringify(rollback, null, 2), { mode: 0o600 });
 }

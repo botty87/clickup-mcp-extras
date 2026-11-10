@@ -35,17 +35,16 @@ There is no delete, create, move or custom-field operation. Unknown fields are r
 
 ## What apply does
 
-- Takes a lock (`apply.lock` in the plan folder), so the same plan cannot be applied twice at once. If a run crashed, delete the lock by hand.
-- Ctrl+C (or SIGTERM) during the writes finishes the current operation, then stops, releases the lock and writes the rollback.
-- A request that hangs fails after 60 s; for a write that counts as an unknown outcome.
+- **A plan is applied once.** If its folder already has a log, `apply` refuses: to continue after a stop, write a new plan from the current state of the tasks (`expected_before` guards it). There is no automatic resume.
+- Takes a lock (`apply.lock` in the plan folder), so the same plan cannot run in two terminals at once. If a run was killed, delete the lock by hand.
 - Runs one operation at a time: it reads the task, compares it with `expected_before`, writes, and logs the result.
 - Stops at the first drift (the task changed since the plan was written), logged as `stopped_drift`. `--skip-drift` skips drifted operations (`skipped_drift`) and goes on. `check` follows several operations on the same task in order, so a chain such as `in review` → `testing` → `done` is not reported as drift.
-- Stops on any error. After a timeout or a 5xx the outcome is unknown (logged as `unknown`): check the task before rerunning. For a comment this matters most, since a rerun may post it twice. An operation of unknown outcome is not in `rollback.json` (its undo would stop the rollback if the write never landed): the rollback `note` names it and says how to undo it by hand. A rerun that applies it turns it into a normal undo.
-- Running `apply` again on the same plan resumes: operations already applied are skipped and shown as `already applied` in the preview. A log line cut short by a crash is treated as an unknown outcome, and the preview warns about every operation of unknown outcome before you confirm.
+- Stops on any error, and says how many operations it applied before stopping. After a timeout (60 s) or a 5xx the outcome is unknown (logged as `unknown`): check the task. An operation of unknown outcome is not in `rollback.json`, since its undo would stop the rollback if the write never landed: the rollback `note` names it and gives the undo to run by hand. A connection refused before sending is a plain error.
+- Ctrl+C (or SIGTERM), at the prompt or during the writes, finishes the current step, then stops, releases the lock and writes the rollback.
 - Writes to `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/plans/<hash8>/`:
   - `plan.json`, the plan that was approved, written only after you confirm;
   - `apply-log.jsonl`, one line per operation with the state before it;
-  - `rollback.json`, a plan that undoes the applied operations, newest write first (across resumed runs too), written even when a run stops on an error. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo (only comments, or nothing applied) there is a `rollback-note.txt` instead.
+  - `rollback.json`, a plan that undoes the run's writes, newest first, written even when the run stops on an error. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo, there is a `rollback-note.txt` instead.
 
 The terminal check and the typed hash guard against mistakes, not against an agent that drives a terminal on purpose: they are a brake, not a lock.
 
