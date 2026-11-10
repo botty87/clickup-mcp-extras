@@ -205,6 +205,8 @@ export function isAmbiguous(err: unknown): boolean {
   return true; // timeouts, resets mid-request, anything unrecognised
 }
 
+export const errMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 // --- Check and apply ---------------------------------------------------------
 
 export type Io = {
@@ -286,7 +288,17 @@ type LogEntry = {
   error?: string;
 };
 
-export type ApplyResult = { dir: string; applied: number; skipped: number; stopped?: string };
+/** `dir` is the run folder, absent when nothing was confirmed (no log, no rollback). */
+export type ApplyResult = { dir?: string; applied: number; skipped: number; stopped?: string };
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM"; // exists, owned by someone else
+  }
+}
 
 class Interrupted extends Error {
   constructor(public signalName: string) {
@@ -322,7 +334,14 @@ export async function apply(
     await writeFile(lockPath, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    throw new Error(`Another apply of this plan is running, or one crashed: if none is running, delete ${lockPath}.`);
+    // A lock whose process is gone was left by a crash or a forced exit: take it over.
+    const holder = Number((await readFile(lockPath, "utf8").catch(() => "")).trim());
+    if (Number.isInteger(holder) && holder > 0 && !isAlive(holder)) {
+      io.out(`Removing a stale lock left by process ${holder}.`);
+      await writeFile(lockPath, `${process.pid}\n`, { mode: 0o600 });
+    } else {
+      throw new Error(`Another apply of this plan is running (process ${holder || "?"}): if it is not, delete ${lockPath}.`);
+    }
   }
 
   // Ctrl+C or a kill from here on: finish what is in progress, then stop, so the
@@ -339,11 +358,13 @@ export async function apply(
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
+  process.on("SIGHUP", onSignal); // terminal closed
   try {
     return await applyLocked(plan, io, opts, dir, short, signal);
   } finally {
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
+    process.off("SIGHUP", onSignal);
     await rm(lockPath, { force: true });
   }
 }
@@ -359,7 +380,7 @@ async function applyLocked(
   // Earlier runs of the same plan: no automatic resume, so a rerun applies
   // every op again. Say so before the person confirms.
   const earlier = (await readdir(dir)).filter((f) => /^run-/.test(f)).sort();
-  const notConfirmed = (stopped: string): ApplyResult => ({ dir, applied: 0, skipped: 0, stopped });
+  const notConfirmed = (stopped: string): ApplyResult => ({ applied: 0, skipped: 0, stopped });
 
   let answer: string;
   try {
@@ -388,11 +409,22 @@ async function applyLocked(
   await writeFile(join(runDir, "plan.json"), JSON.stringify(plan, null, 2), { mode: 0o600 });
   const logPath = join(runDir, "apply-log.jsonl");
 
+  // log() never throws: a write that landed must not lose its outcome message
+  // because the disk is full. rollback.json is refreshed after every entry, so a
+  // run killed outright (kill -9, a second Ctrl+C) still leaves an undo.
   const entries: LogEntry[] = [];
-  const log = async (e: Omit<LogEntry, "ts">) => {
+  let logError: string | undefined;
+  const log = async (e: Omit<LogEntry, "ts">): Promise<boolean> => {
     const entry = { ts: new Date().toISOString(), ...e };
     entries.push(entry);
-    await appendFile(logPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    try {
+      await appendFile(logPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+      await writeRollback(plan, runDir, short, entries);
+      return true;
+    } catch (err) {
+      logError ??= errMessage(err);
+      return false;
+    }
   };
 
   let applied = 0;
@@ -411,7 +443,7 @@ async function applyLocked(
         try {
           task = await getTask(op.task_id);
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errMessage(err);
           await log({ ...base, result: "error", error: `read failed: ${msg}` });
           stopped = `#${index + 1}: reading the task failed (${msg}); nothing written for it`;
           break;
@@ -432,17 +464,13 @@ async function applyLocked(
       try {
         const res = await write(op);
         applied++;
-        try {
-          await log({ ...base, result: "ok", before, ...res });
-        } catch (logErr) {
-          // The write landed: it is in `entries`, so the rollback still covers it.
-          const msg = logErr instanceof Error ? logErr.message : String(logErr);
-          stopped = `#${index + 1} was written, but the log could not be updated (${msg})`;
+        if (!(await log({ ...base, result: "ok", before, ...res }))) {
+          stopped = `#${index + 1} was written, but the log could not be updated`;
           break;
         }
         io.out(`#${index + 1} ok`);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errMessage(err);
         const unknown = isAmbiguous(err);
         await log({ ...base, result: unknown ? "unknown" : "error", before, error: msg });
         stopped = unknown
@@ -457,9 +485,10 @@ async function applyLocked(
     try {
       await writeRollback(plan, runDir, short, entries);
     } catch (err) {
-      io.out(`WARNING: rollback not written: ${err instanceof Error ? err.message : String(err)}`);
+      io.out(`WARNING: rollback not written: ${errMessage(err)}`);
     }
   }
+  if (logError) stopped = `${stopped ?? "finished"}; log/rollback write failed: ${logError}`;
   if (stopped && applied + skipped < plan.ops.length) {
     stopped += `. Applied before stopping: ${applied}. To go on, write a new plan for the remaining operations.`;
   }

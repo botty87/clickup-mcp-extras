@@ -66,7 +66,7 @@ async function main(argv: string[]): Promise<number> {
 
   const r = await apply(plan, io, { approve, skipDrift, allowLarge });
   io.out(`applied: ${r.applied}, skipped for drift: ${r.skipped}`);
-  io.out(`log and rollback: ${r.dir}`);
+  if (r.dir) io.out(`log and rollback: ${r.dir}`);
   if (r.stopped) {
     io.out(`stopped: ${r.stopped}`);
     return 1;

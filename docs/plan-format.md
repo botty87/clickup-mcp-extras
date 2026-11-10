@@ -36,15 +36,15 @@ There is no delete, create, move or custom-field operation. Unknown fields are r
 ## What apply does
 
 - **No automatic resume.** To continue after a stop, write a new plan from the current state of the tasks (`expected_before` guards it). Running the same plan again repeats every operation: the preview warns about it, since operations without `expected_before`, like comments, are not guarded.
-- Takes a lock, `plans/<hash8>/apply.lock` under the state folder below, so the same plan cannot run in two terminals at once. If a run was killed, delete the lock by hand (the error message gives its path).
+- Takes a lock, `plans/<hash8>/apply.lock` under the state folder below, so the same plan cannot run in two terminals at once. A lock left by a process that no longer exists is taken over automatically.
 - Runs one operation at a time: it reads the task, compares it with `expected_before`, writes, and logs the result.
 - Stops at the first drift (the task changed since the plan was written), logged as `stopped_drift`. `--skip-drift` skips drifted operations (`skipped_drift`) and goes on. `check` follows several operations on the same task in order, so a chain such as `in review` → `testing` → `done` is not reported as drift.
 - Stops on any error, and says how many operations it applied before stopping. After a timeout (60 s) or a 5xx the outcome is unknown (logged as `unknown`): check the task. The timeout starts when the request is sent, after any rate-limit pause. An operation of unknown outcome is not in `rollback.json`, since its undo would stop the rollback if the write never landed: the rollback `note` names it and gives the undo to run by hand. A connection refused or a connect timeout (nothing sent) is a plain error. If the write succeeds but the log cannot be written, the run stops and the rollback still covers that write.
-- Ctrl+C (or SIGTERM), at the prompt or during the writes, finishes the current step, then stops, releases the lock and writes the rollback. A second Ctrl+C exits at once and leaves the lock. Ctrl+D at the prompt cancels.
+- Ctrl+C (or SIGTERM), at the prompt or during the writes, finishes the current step, then stops, releases the lock and writes the rollback. Closing the terminal (SIGHUP) counts the same. A second Ctrl+C exits at once. Ctrl+D at the prompt cancels.
 - Each confirmed run writes to its own folder, `${XDG_STATE_HOME:-~/.local/state}/clickup-mcp-extras/plans/<hash8>/run-<time>/`:
   - `plan.json`, the plan that was approved, written only after you confirm;
   - `apply-log.jsonl`, one line per operation with the state before it;
-  - `rollback.json`, a plan that undoes the run's writes, newest first, written even when the run stops on an error. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo, there is a `rollback-note.txt` instead.
+  - `rollback.json`, a plan that undoes the run's writes, newest first, refreshed after every operation, so it exists even if the run is killed. It goes through `check` and `apply` like any other plan. Posted comments are listed in its `note` by ID. When there is nothing to undo, there is a `rollback-note.txt` instead.
 
 The terminal check and the typed hash guard against mistakes, not against an agent that drives a terminal on purpose: they are a brake, not a lock.
 

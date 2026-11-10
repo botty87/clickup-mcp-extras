@@ -230,7 +230,20 @@ test("plan.json is written only after confirmation", async () => {
   const short = planHash(plan).slice(0, 8);
   const r = await apply(plan, io("wrong"), { approve: short });
   assert.equal(r.stopped, "not confirmed");
-  await assert.rejects(readFile(join(r.dir, "plan.json"), "utf8"), /ENOENT/);
+  assert.equal(r.dir, undefined);
+  const { readdir } = await import("node:fs/promises");
+  assert.deepEqual((await readdir(join(plansDir(), short))).filter((f) => f.startsWith("run-")), []);
+});
+
+test("a lock left by a dead process is taken over", async () => {
+  const plan = parsePlan({ version: 1, team_id: TEAM, ops: [{ op: "add_tag", task_id: "a", args: { tag: "s" } }] });
+  const short = planHash(plan).slice(0, 8);
+  await mkdir(join(plansDir(), short), { recursive: true });
+  await writeFile(join(plansDir(), short, "apply.lock"), "999999\n"); // no such process
+  const o = io(short);
+  const r = await apply(plan, o, { approve: short });
+  assert.equal(r.applied, 1);
+  assert.match(o.lines.join("\n"), /stale lock left by process 999999/);
 });
 
 test("tags compare case-insensitively and are written in lowercase", async () => {
